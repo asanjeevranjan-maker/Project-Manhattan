@@ -1,0 +1,51 @@
+// Prisma schema for SatQuery AI
+// SIH26167 — Interactive Vision-Language Assistant for Remote Sensing
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Image {
+  id          String         @id @default(cuid())
+  filename    String
+  mimeType    String
+  size        Int
+  // We store image data as base64 in DB for the prototype.
+  // In production this would be an S3/OSS URL.
+  dataUrl     String
+  // Optional metadata
+  location    String?
+  uploadedAt  DateTime       @default(now())
+  queries     Query[]
+}
+
+model Query {
+  id           String          @id @default(cuid())
+  imageId      String
+  image        Image           @relation(fields: [imageId], references: [id], onDelete: Cascade)
+  text         String
+  // Detected intent: water_detection | building_detection | vegetation_segmentation | change_detection | road_detection | image_understanding | other
+  intent       String
+  createdAt    DateTime        @default(now())
+  result       AnalysisResult?
+}
+
+model AnalysisResult {
+  id           String   @id @default(cuid())
+  queryId      String   @unique
+  query        Query    @relation(fields: [queryId], references: [id], onDelete: Cascade)
+  // VLM textual answer (markdown-safe)
+  answer       String
+  // JSON-serialized list of detected objects: [{class, confidence, region?}]
+  objectsDetected String
+  // Overall confidence 0..1
+  confidence   Float
+  // Optional class coverage map: {water: 0.12, urban: 0.34, ...}
+  coverage     String?
+  createdAt    DateTime @default(now())
+}
