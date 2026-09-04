@@ -52,3 +52,19 @@ prompt
 server.log
 # Skills directory
 /skills/
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Next.js
+.next/
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
