@@ -1,21 +1,24 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSatQueryStore } from '@/store/satquery';
 import { ImageViewer } from './image-viewer';
 import { ChatPanel } from './chat-panel';
 import { AnalysisPanel } from './analysis-panel';
 import { ImageUploader } from './image-uploader';
 import { SampleImages } from './sample-images';
+import { BiTemporalWorkspace } from './bitemporal/bitemporal-workspace';
 import { Button } from '@/components/ui/button';
-import { ChevronLeft, Sparkles } from 'lucide-react';
+import { ChevronLeft, Sparkles, ScanEye, GitCompareArrows } from 'lucide-react';
 import { SatQueryWordmark } from './logo';
 
 interface Props {
   onExit: () => void;
+  initialTab?: 'single' | 'bitemporal';
 }
 
-export function Workspace({ onExit }: Props) {
+export function Workspace({ onExit, initialTab = 'single' }: Props) {
+  const [workspaceTab, setWorkspaceTab] = useState<'single' | 'bitemporal'>(initialTab);
   const activeImage = useSatQueryStore((s) => s.activeImage);
   const latestAnalysis = useSatQueryStore((s) => s.latestAnalysis);
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -43,8 +46,40 @@ export function Workspace({ onExit }: Props) {
           <div className="hidden h-5 w-px bg-border sm:block" />
           <SatQueryWordmark className="hidden sm:flex" />
         </div>
+
+        {/* Center Workspace Mode Switcher */}
+        <div className="flex items-center rounded-lg border bg-muted/50 p-1">
+          <button
+            type="button"
+            onClick={() => setWorkspaceTab('single')}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-semibold transition ${
+              workspaceTab === 'single'
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <ScanEye className="size-3.5" /> Single Image Analysis
+          </button>
+          <button
+            type="button"
+            onClick={() => setWorkspaceTab('bitemporal')}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-semibold transition ${
+              workspaceTab === 'bitemporal'
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <GitCompareArrows className="size-3.5 text-primary" /> Bi-Temporal Comparison
+          </button>
+        </div>
+
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          {activeImage ? (
+          {workspaceTab === 'bitemporal' ? (
+            <span className="flex items-center gap-1.5 text-primary font-medium">
+              <span className="size-1.5 rounded-full bg-emerald-500 glow-pulse" />
+              Temporal Engine Active
+            </span>
+          ) : activeImage ? (
             <>
               <span className="hidden sm:inline">Workspace</span>
               <span className="size-1.5 rounded-full bg-emerald-500" />
@@ -62,8 +97,11 @@ export function Workspace({ onExit }: Props) {
       </header>
 
       <div className="mx-auto max-w-[1600px] p-3 sm:p-4">
-        {!activeImage ? (
-          // Onboarding screen when no image is loaded
+        {workspaceTab === 'bitemporal' ? (
+          /* Real-Time / Bi-Temporal Comparison Mode */
+          <BiTemporalWorkspace />
+        ) : !activeImage ? (
+          /* Onboarding screen when no single image is loaded */
           <div className="mx-auto max-w-3xl space-y-6 py-8">
             <div className="space-y-2 text-center">
               <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
@@ -87,7 +125,7 @@ export function Workspace({ onExit }: Props) {
             </div>
           </div>
         ) : (
-          // Main 3-panel workspace layout
+          /* Main 3-panel single-image workspace layout */
           <div className="grid gap-3 lg:grid-cols-12 lg:gap-4">
             {/* Left — image viewer (largest panel) */}
             <div className="lg:col-span-7 xl:col-span-7">

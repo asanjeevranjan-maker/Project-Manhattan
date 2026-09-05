@@ -1,15 +1,16 @@
 'use client';
 
 import { Button } from '@/components/ui/button';
-import { Github, Rocket, Sparkles } from 'lucide-react';
+import { Github, Rocket, Sparkles, GitCompareArrows } from 'lucide-react';
 import { SatQueryWordmark } from './logo';
 
 interface Props {
   onLaunch: () => void;
+  onLaunchBiTemporal?: () => void;
   hasImage: boolean;
 }
 
-export function Header({ onLaunch, hasImage }: Props) {
+export function Header({ onLaunch, onLaunchBiTemporal, hasImage }: Props) {
   return (
     <header className="sticky top-0 z-40 w-full border-b border-border/60 bg-background/80 backdrop-blur-md">
       <div className="mx-auto flex h-14 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6">
@@ -27,6 +28,13 @@ export function Header({ onLaunch, hasImage }: Props) {
           >
             Features
           </a>
+          <button
+            type="button"
+            onClick={onLaunchBiTemporal || onLaunch}
+            className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-primary transition-colors hover:bg-primary/10"
+          >
+            <GitCompareArrows className="size-3.5" /> Bi-Temporal
+          </button>
           <a
             href="#use-cases"
             className="rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"

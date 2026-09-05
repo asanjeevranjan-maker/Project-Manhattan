@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
-import { Eye, EyeOff, Image as ImageIcon, Loader2, X } from 'lucide-react';
+import { Eye, EyeOff, Image as ImageIcon, Loader2, X, FileWarning } from 'lucide-react';
 import { useSatQueryStore } from '@/store/satquery';
+import { ImageUploader } from './image-uploader';
 import type { AnalysisResult } from '@/lib/types';
 
 /**
@@ -21,14 +22,14 @@ export function ImageViewer() {
   const analysis = useSatQueryStore((s) => s.latestAnalysis);
   const showOverlay = useSatQueryStore((s) => s.showOverlay);
   const setShowOverlay = useSatQueryStore((s) => s.setShowOverlay);
+  const isAnalyzing = useSatQueryStore((s) => s.isAnalyzing);
   const reset = useSatQueryStore((s) => s.reset);
-  const [imgLoaded, setImgLoaded] = useState(false);
+  const [loadedImageId, setLoadedImageId] = useState<string | null>(null);
+  const [errorImageId, setErrorImageId] = useState<string | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
 
-  // Reset loaded state when image changes
-  useEffect(() => {
-    setImgLoaded(false);
-  }, [activeImage?.id]);
+  const imgLoaded = !!activeImage && loadedImageId === activeImage.id;
+  const imgError = !!activeImage && errorImageId === activeImage.id;
 
   if (!activeImage) {
     return (
@@ -62,6 +63,7 @@ export function ImageViewer() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          <ImageUploader variant="compact" />
           {hasRegions && (
             <Button
               size="sm"
@@ -88,35 +90,53 @@ export function ImageViewer() {
 
       {/* Image canvas */}
       <div className="relative flex-1 overflow-hidden rounded-xl border bg-[repeating-conic-gradient(hsl(0_0%_88%)_0%_25%,hsl(0_0%_94%)_0%_50%)] bg-[length:20px_20px] dark:bg-[repeating-conic-gradient(hsl(0_0%_22%)_0%_25%,hsl(0_0%_18%)_0%_50%)]">
-        {!imgLoaded && (
-          <div className="absolute inset-0 flex items-center justify-center bg-background/60">
-            <Loader2 className="size-6 animate-spin text-muted-foreground" />
-          </div>
-        )}
-        <img
-          ref={imgRef}
-          src={activeImage.dataUrl}
-          alt={activeImage.filename}
-          onLoad={() => setImgLoaded(true)}
-          className={cn(
-            'h-full w-full object-contain transition-opacity duration-300',
-            imgLoaded ? 'opacity-100' : 'opacity-0'
-          )}
-        />
-
-        {/* Overlay layer — same bounding box as the image */}
-        {imgLoaded && showOverlay && hasRegions && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <div className="relative h-full w-full">
-              {regions.map((region, idx) => (
-                <RegionBox key={`${idx}-${region.label}`} region={region} index={idx} />
-              ))}
+        {imgError ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center bg-card/95">
+            <div className="flex size-12 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+              <FileWarning className="size-6" />
             </div>
+            <div className="space-y-1 max-w-sm">
+              <p className="text-sm font-semibold">Unable to display this image preview</p>
+              <p className="text-xs text-muted-foreground">
+                Your browser couldn't render this file directly (common for raw TIFF or uncompressed rasters). You can still query it with AI or upload another image.
+              </p>
+            </div>
+            <ImageUploader variant="compact" />
           </div>
+        ) : (
+          <>
+            {!imgLoaded && (
+              <div className="absolute inset-0 flex items-center justify-center bg-background/60">
+                <Loader2 className="size-6 animate-spin text-muted-foreground" />
+              </div>
+            )}
+            <img
+              ref={imgRef}
+              src={activeImage.dataUrl}
+              alt={activeImage.filename}
+              onLoad={() => setLoadedImageId(activeImage.id)}
+              onError={() => setErrorImageId(activeImage.id)}
+              className={cn(
+                'h-full w-full object-contain transition-opacity duration-300',
+                imgLoaded ? 'opacity-100' : 'opacity-0'
+              )}
+            />
+
+            {/* Overlay layer — same bounding box as the image */}
+            {imgLoaded && showOverlay && hasRegions && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <div className="relative h-full w-full">
+                  {regions.map((region, idx) => (
+                    <RegionBox key={`${idx}-${region.label}`} region={region} index={idx} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
         )}
 
         {/* Live "analyzing" badge */}
-        {useSatQueryStore.getState().isAnalyzing && (
+        {isAnalyzing && (
           <div className="absolute right-3 top-3 flex items-center gap-2 rounded-full bg-background/90 px-3 py-1.5 text-xs font-medium shadow-sm backdrop-blur">
             <span className="size-2 rounded-full bg-primary glow-pulse" />
             Analyzing…

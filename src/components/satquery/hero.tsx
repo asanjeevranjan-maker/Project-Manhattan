@@ -1,16 +1,17 @@
 'use client';
 
 import { Button } from '@/components/ui/button';
-import { ArrowRight, MessageSquare, Satellite, ScanEye, BarChart3 } from 'lucide-react';
+import { ArrowRight, MessageSquare, Satellite, ScanEye, BarChart3, GitCompareArrows } from 'lucide-react';
 import { ImageUploader } from './image-uploader';
 import { SampleImages } from './sample-images';
 import { useSatQueryStore } from '@/store/satquery';
 
 interface Props {
   onLaunch: () => void;
+  onLaunchBiTemporal?: () => void;
 }
 
-export function Hero({ onLaunch }: Props) {
+export function Hero({ onLaunch, onLaunchBiTemporal }: Props) {
   const activeImage = useSatQueryStore((s) => s.activeImage);
 
   return (
@@ -42,15 +43,18 @@ export function Hero({ onLaunch }: Props) {
             <div className="flex flex-wrap items-center gap-3">
               <Button size="lg" onClick={onLaunch} className="gap-2">
                 <Satellite className="size-4" />
-                Launch Workspace
+                Single Image Q&A
                 <ArrowRight className="size-4" />
               </Button>
-              <a
-                href="#how-it-works"
-                className="text-sm font-medium text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+              <Button
+                size="lg"
+                variant="outline"
+                onClick={onLaunchBiTemporal || onLaunch}
+                className="gap-2"
               >
-                See how it works →
-              </a>
+                <GitCompareArrows className="size-4 text-primary" />
+                Bi-Temporal Comparison
+              </Button>
             </div>
 
             {/* Quick stats */}
@@ -76,7 +80,7 @@ export function Hero({ onLaunch }: Props) {
                 </Button>
               )}
             </div>
-            <ImageUploader />
+            <ImageUploader onSuccess={onLaunch} />
             <div className="my-4 flex items-center gap-3">
               <div className="h-px flex-1 bg-border" />
               <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -84,7 +88,7 @@ export function Hero({ onLaunch }: Props) {
               </span>
               <div className="h-px flex-1 bg-border" />
             </div>
-            <SampleImages />
+            <SampleImages onSelect={onLaunch} />
 
             {/* Quick example queries preview */}
             <div className="mt-4 rounded-lg border border-dashed bg-muted/30 p-3">

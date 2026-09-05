@@ -10,14 +10,15 @@ import type { UploadedImage } from '@/lib/types';
 import { useSatQueryStore } from '@/store/satquery';
 
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
-const ACCEPTED = 'image/png,image/jpeg,image/jpg,image/tiff,image/webp,image/bmp';
+const ACCEPTED = 'image/png,image/jpeg,image/jpg,image/tiff,image/webp,image/bmp,.png,.jpg,.jpeg,.tif,.tiff,.webp,.bmp';
 
 interface Props {
   variant?: 'dropzone' | 'compact';
   className?: string;
+  onSuccess?: (img: UploadedImage) => void;
 }
 
-export function ImageUploader({ variant = 'dropzone', className }: Props) {
+export function ImageUploader({ variant = 'dropzone', className, onSuccess }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -30,7 +31,10 @@ export function ImageUploader({ variant = 'dropzone', className }: Props) {
       if (!file) return;
       setError(null);
 
-      if (!file.type.startsWith('image/')) {
+      const isImageMime = Boolean(file.type && file.type.startsWith('image/'));
+      const isImageExt = /\.(png|jpe?g|webp|tiff?|bmp|gif|svg)$/i.test(file.name);
+
+      if (!isImageMime && !isImageExt) {
         setError('Please select an image file.');
         toast({
           variant: 'destructive',
@@ -54,10 +58,18 @@ export function ImageUploader({ variant = 'dropzone', className }: Props) {
       setIsLoading(true);
       try {
         const dataUrl = await fileToDataUrl(file);
+        const resolvedMime = file.type || (
+          /\.tiff?$/i.test(file.name) ? 'image/tiff' :
+          /\.png$/i.test(file.name) ? 'image/png' :
+          /\.webp$/i.test(file.name) ? 'image/webp' :
+          /\.bmp$/i.test(file.name) ? 'image/bmp' :
+          'image/jpeg'
+        );
+
         const img: UploadedImage = {
           id: shortId('img-'),
           filename: file.name,
-          mimeType: file.type,
+          mimeType: resolvedMime,
           size: file.size,
           dataUrl,
         };
@@ -66,6 +78,13 @@ export function ImageUploader({ variant = 'dropzone', className }: Props) {
           title: 'Image loaded',
           description: `${file.name} · ${formatBytes(file.size)}`,
         });
+
+        // Reset file input so re-selecting the same file triggers onChange
+        if (inputRef.current) {
+          inputRef.current.value = '';
+        }
+
+        onSuccess?.(img);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Failed to read file';
         setError(msg);
@@ -78,7 +97,7 @@ export function ImageUploader({ variant = 'dropzone', className }: Props) {
         setIsLoading(false);
       }
     },
-    [setActiveImage, toast]
+    [setActiveImage, toast, onSuccess]
   );
 
   const onDrop = useCallback(

@@ -26,7 +26,7 @@ const CATEGORY_COLOR: Record<SampleImage['category'], string> = {
   coastal: 'bg-teal-500/15 text-teal-700 dark:text-teal-300',
 };
 
-export function SampleImages() {
+export function SampleImages({ onSelect }: { onSelect?: () => void } = {}) {
   const [samples, setSamples] = useState<SampleImage[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingId, setLoadingId] = useState<string | null>(null);
@@ -79,6 +79,7 @@ export function SampleImages() {
         title: 'Sample loaded',
         description: `${s.title} — ${s.location}`,
       });
+      onSelect?.();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to load sample';
       toast({
