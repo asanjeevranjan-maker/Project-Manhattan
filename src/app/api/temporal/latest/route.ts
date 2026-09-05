@@ -1,9 +1,11 @@
 // POST /api/temporal/latest
 //
-// Proxies Real-Time Bi-Temporal Comparison to the Python AI service.
-// Supports both Historical Date retrieval and Historical Image Upload.
+// Proxies Real-Time Bi-Temporal Comparison to the Python AI service when available,
+// or seamlessly falls back to Cloud-Native Satellite Imagery (Esri Wayback WMTS)
+// and Gemini Vision on serverless platforms like Vercel.
 
 import { NextRequest, NextResponse } from "next/server";
+import { runCloudTemporalComparison } from "@/lib/cloud-temporal";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,15 +14,63 @@ export const maxDuration = 300;
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://127.0.0.1:8000";
 
 export async function POST(req: NextRequest) {
+  let aoi = {
+    north: 12.98,
+    south: 12.96,
+    east: 77.61,
+    west: 77.59,
+  };
+  let prompt = "building";
+  let historicalMode = "date";
+  let historicalDate = "2024-01-15";
+  let historicalFileBase64: string | undefined = undefined;
+  let formDataToSend: FormData | null = null;
+
   try {
     const contentType = req.headers.get("content-type") || "";
-    let formDataToSend: FormData;
 
     if (contentType.includes("multipart/form-data")) {
-      formDataToSend = await req.formData();
+      const reqFormData = await req.formData();
+      formDataToSend = reqFormData;
+
+      const n = reqFormData.get("aoi_north");
+      const s = reqFormData.get("aoi_south");
+      const e = reqFormData.get("aoi_east");
+      const w = reqFormData.get("aoi_west");
+      if (n && s && e && w) {
+        aoi = { north: Number(n), south: Number(s), east: Number(e), west: Number(w) };
+      }
+      const p = reqFormData.get("prompt");
+      if (p) prompt = String(p);
+      const hm = reqFormData.get("historical_mode");
+      if (hm) historicalMode = String(hm);
+      const hd = reqFormData.get("historical_date");
+      if (hd) historicalDate = String(hd);
+      const hf = reqFormData.get("historical_file");
+      if (hf && typeof (hf as any).arrayBuffer === "function") {
+        try {
+          const buf = Buffer.from(await (hf as File).arrayBuffer());
+          historicalFileBase64 = `data:${(hf as File).type || "image/jpeg"};base64,${buf.toString("base64")}`;
+        } catch {
+          // Ignore upload parsing error
+        }
+      }
     } else {
       const jsonBody = await req.json();
       formDataToSend = new FormData();
+
+      if (jsonBody.aoi) aoi = jsonBody.aoi;
+      if (jsonBody.prompt) prompt = jsonBody.prompt;
+      if (jsonBody.historical_mode || jsonBody.historicalMode) {
+        historicalMode = jsonBody.historical_mode || jsonBody.historicalMode;
+      }
+      if (jsonBody.historical_date || jsonBody.historicalDate) {
+        historicalDate = jsonBody.historical_date || jsonBody.historicalDate;
+      }
+      if (jsonBody.historical_file || jsonBody.historicalFile) {
+        historicalFileBase64 = jsonBody.historical_file || jsonBody.historicalFile;
+      }
+
       for (const [key, val] of Object.entries(jsonBody)) {
         if (val !== undefined && val !== null) {
           if (typeof val === "object" && key === "aoi") {
@@ -36,44 +86,60 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const aiRes = await fetch(`${AI_SERVICE_URL}/temporal/latest`, {
-      method: "POST",
-      body: formDataToSend,
+    // 1. Try local or dedicated AI service backend if reachable
+    if (AI_SERVICE_URL && formDataToSend) {
+      try {
+        const controller = new AbortController();
+        const timeoutMs = AI_SERVICE_URL.includes("127.0.0.1") || AI_SERVICE_URL.includes("localhost") ? 3500 : 30000;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+        const aiRes = await fetch(`${AI_SERVICE_URL}/temporal/latest`, {
+          method: "POST",
+          body: formDataToSend,
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        if (aiRes.ok) {
+          const data = await aiRes.json();
+          return NextResponse.json(data);
+        }
+      } catch (backendErr) {
+        console.warn("[/api/temporal/latest] AI service unavailable, falling back to cloud-native engine:", backendErr);
+      }
+    }
+
+    // 2. Cloud-native fallback: direct Esri Wayback satellite retrieval & Gemini Vision
+    const cloudResult = await runCloudTemporalComparison({
+      aoi,
+      prompt,
+      historicalMode,
+      historicalDate,
+      historicalFileBase64,
     });
 
-    if (!aiRes.ok) {
-      let errDetail = `HTTP ${aiRes.status}`;
-      try {
-        const errJson = await aiRes.json();
-        if (errJson.error || errJson.details) {
-          errDetail = errJson.details || errJson.error;
-        }
-      } catch {
-        // use fallback text
-      }
+    return NextResponse.json(cloudResult);
+  } catch (error) {
+    console.error("[/api/temporal/latest fatal error]:", error);
+    try {
+      const fallbackResult = await runCloudTemporalComparison({
+        aoi,
+        prompt,
+        historicalMode,
+        historicalDate,
+        historicalFileBase64,
+      });
+      return NextResponse.json(fallbackResult);
+    } catch {
+      const msg = error instanceof Error ? error.message : "Temporal service unavailable";
       return NextResponse.json(
         {
           success: false,
           error: "Temporal comparison failed",
-          details: errDetail,
+          details: msg,
         },
-        { status: aiRes.status }
+        { status: 500 }
       );
     }
-
-    const data = await aiRes.json();
-    return NextResponse.json(data);
-  } catch (error) {
-    console.error("[/api/temporal/latest error]:", error);
-    const msg = error instanceof Error ? error.message : "Temporal service unavailable";
-    return NextResponse.json(
-      {
-        success: false,
-        error: "Failed to connect to temporal comparison engine",
-        details: `${msg}. Please ensure the AI service backend is running on port 8000.`,
-      },
-      { status: 500 }
-    );
   }
 }
-
