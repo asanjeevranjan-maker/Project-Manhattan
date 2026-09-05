@@ -7,7 +7,7 @@ Provides class-specific thresholding, label normalization, and clean output form
 import re
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional, Any, Set
+from typing import Dict, List, Tuple, Optional, Any, Set, Union
 
 logger = logging.getLogger("satquery.detection.vocabulary")
 if not logger.handlers:
@@ -444,23 +444,8 @@ def compute_relative_location(box: List[float], width: int, height: int) -> str:
 
 def box_iou(box1: List[float], box2: List[float]) -> float:
     """Computes Intersection over Union between two [x1, y1, x2, y2] boxes."""
-    x1 = max(box1[0], box2[0])
-    y1 = max(box1[1], box2[1])
-    x2 = min(box1[2], box2[2])
-    y2 = min(box1[3], box2[3])
-
-    iw = max(0.0, x2 - x1)
-    ih = max(0.0, y2 - y1)
-    intersection = iw * ih
-
-    area1 = max(0.0, box1[2] - box1[0]) * max(0.0, box1[3] - box1[1])
-    area2 = max(0.0, box2[2] - box2[0]) * max(0.0, box2[3] - box2[1])
-
-    union = area1 + area2 - intersection
-    if union <= 0.0:
-        return 0.0
-
-    return intersection / union
+    from .nms import calculate_iou
+    return calculate_iou(box1, box2)
 
 
 # =====================================================================
@@ -536,54 +521,39 @@ def format_detection(
 
 def remove_duplicate_detections(
     detections: List[Dict[str, Any]],
-    iou_threshold: float = 0.25,
+    iou_threshold: Optional[float] = None,
+    merge_mode: str = "standard",
 ) -> List[Dict[str, Any]]:
     """
-    Removes duplicate overlapping bounding boxes of the same canonical class using greedy NMS.
+    Removes duplicate overlapping bounding boxes of the same canonical class using class-aware NMS.
     """
-    if not detections:
-        return []
-
-    sorted_dets = sorted(detections, key=lambda d: d.get("score", d.get("confidence", 0.0)), reverse=True)
-    kept: List[Dict[str, Any]] = []
-
-    for det in sorted_dets:
-        box = det.get("bbox") or det.get("box")
-        label = det.get("label", "").lower()
-        if not box:
-            continue
-
-        duplicate = False
-        for existing in kept:
-            existing_box = existing.get("bbox") or existing.get("box")
-            existing_label = existing.get("label", "").lower()
-
-            if label != existing_label:
-                continue
-
-            if existing_box and box_iou(box, existing_box) > iou_threshold:
-                duplicate = True
-                break
-
-        if not duplicate:
-            kept.append(det)
-
-    return kept
+    from .nms import apply_class_nms
+    return apply_class_nms(
+        detections=detections,
+        iou_threshold=iou_threshold,
+        merge_mode=merge_mode,
+        return_debug_info=False,
+    )
 
 
 def filter_and_format_detections(
     raw_detections: List[Dict[str, Any]],
     width: int,
     height: int,
-    iou_threshold: float = 0.25,
-) -> List[Dict[str, Any]]:
+    iou_threshold: Optional[float] = None,
+    merge_mode: str = "standard",
+    return_dedup_info: bool = False,
+) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, int]]]:
     """
     Processes a list of raw detections from Grounding DINO:
     1. Normalizes and validates each detection with class-specific thresholds
     2. Drops truncated or invalid labels
-    3. Performs NMS duplicate removal
+    3. Performs class-aware NMS duplicate removal
     4. Re-assigns clean sequential IDs ('det-1', 'det-2', etc.)
+    5. Optionally returns deduplication debug stats
     """
+    from .nms import apply_class_nms
+
     formatted: List[Dict[str, Any]] = []
 
     for idx, raw in enumerate(raw_detections):
@@ -605,12 +575,29 @@ def filter_and_format_detections(
         if det:
             formatted.append(det)
 
-    # Deduplicate via NMS
-    deduped = remove_duplicate_detections(formatted, iou_threshold=iou_threshold)
+    # Deduplicate via class-aware NMS
+    dedup_res = apply_class_nms(
+        detections=formatted,
+        iou_threshold=iou_threshold,
+        merge_mode=merge_mode,
+        return_debug_info=return_dedup_info,
+    )
+
+    if return_dedup_info:
+        deduped, dedup_stats = dedup_res
+        dedup_stats["raw_detection_count"] = len(raw_detections)
+        dedup_stats["final_detection_count"] = len(deduped)
+        dedup_stats["duplicates_removed"] = max(0, len(raw_detections) - len(deduped))
+    else:
+        deduped = dedup_res
+        dedup_stats = None
 
     # Re-index with clean IDs
     for idx, d in enumerate(deduped):
         d["id"] = f"det-{idx + 1}"
+
+    if return_dedup_info:
+        return deduped, dedup_stats
 
     return deduped
 

@@ -164,6 +164,8 @@ async def detect(
     prompt: str = Form(...),
     preset: Optional[str] = Form(None),
     use_tiles: Optional[bool] = Form(None),
+    iou_threshold: Optional[float] = Form(None),
+    merge_mode: Optional[str] = Form("standard"),
 ):
     try:
         if file is None:
@@ -183,17 +185,21 @@ async def detect(
         except Exception as image_error:
             return JSONResponse(status_code=400, content={"error": "Unable to read the uploaded image.", "details": str(image_error)})
 
-        print(f"\n[SINGLE-IMAGE] Filename: {file.filename} | Prompt: {prompt} | Preset: {preset} | use_tiles: {use_tiles}")
+        print(f"\n[SINGLE-IMAGE] Filename: {file.filename} | Prompt: {prompt} | Preset: {preset} | use_tiles: {use_tiles} | merge_mode: {merge_mode}")
         detections, tiling_meta = detect_objects(
             image=image,
             prompt=prompt.strip(),
             preset=preset,
             use_tiles=use_tiles,
+            iou_threshold=iou_threshold,
+            merge_mode=merge_mode or "standard",
             return_tiling_metadata=True,
         )
 
         if detections is None:
             detections = []
+
+        dedup_stats = tiling_meta.get("deduplication") if isinstance(tiling_meta, dict) else None
 
         result = {
             "count": len(detections),
@@ -203,6 +209,7 @@ async def detect(
             "preset": preset,
             "detections": detections,
             "tiling": tiling_meta,
+            "deduplication": dedup_stats,
         }
 
         return JSONResponse(status_code=200, content=result)

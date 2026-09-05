@@ -42,10 +42,19 @@ try:
         tile_bbox_to_global,
         format_tile_metadata,
     )
+    from services.detection.nms import (
+        DEFAULT_NMS_IOU_THRESHOLD,
+        DEFAULT_CLASS_NMS_THRESHOLDS,
+        get_class_nms_threshold,
+        calculate_iou,
+        apply_class_nms,
+        get_deduplication_stats,
+    )
 except ImportError:
     # Direct relative import fallback
     from services.detection.vocabulary import *  # type: ignore
     from services.detection.tiler import *  # type: ignore
+    from services.detection.nms import *  # type: ignore
 
 __all__ = [
     "SATELLITE_CLASSES",
@@ -73,5 +82,11 @@ __all__ = [
     "generate_tiles",
     "tile_bbox_to_global",
     "format_tile_metadata",
+    "DEFAULT_NMS_IOU_THRESHOLD",
+    "DEFAULT_CLASS_NMS_THRESHOLDS",
+    "get_class_nms_threshold",
+    "calculate_iou",
+    "apply_class_nms",
+    "get_deduplication_stats",
 ]
 

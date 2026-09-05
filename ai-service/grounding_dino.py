@@ -45,6 +45,12 @@ from dino_vocabulary import (
     generate_tiles,
     tile_bbox_to_global,
     format_tile_metadata,
+    DEFAULT_NMS_IOU_THRESHOLD,
+    DEFAULT_CLASS_NMS_THRESHOLDS,
+    get_class_nms_threshold,
+    calculate_iou,
+    apply_class_nms,
+    get_deduplication_stats,
 )
 
 logger = logging.getLogger("satquery.grounding_dino")
@@ -225,6 +231,8 @@ def detect_objects(
     tile_size: int = TILE_SIZE,
     overlap: float = TILE_OVERLAP,
     max_tiles: int = MAX_TILES,
+    iou_threshold: Optional[float] = None,
+    merge_mode: str = "standard",
     return_tiling_metadata: bool = False,
 ):
     """
@@ -315,16 +323,19 @@ def detect_objects(
         f"[Grounding DINO] Total raw candidates across tiles: {len(all_detections)}"
     )
 
-    # 3. Format and deduplicate via NMS
-    final_detections = filter_and_format_detections(
+    # 3. Format and deduplicate via Global Class-Aware NMS
+    final_detections, dedup_stats = filter_and_format_detections(
         raw_detections=all_detections,
         width=full_width,
         height=full_height,
-        iou_threshold=NMS_IOU_THRESHOLD,
+        iou_threshold=iou_threshold,
+        merge_mode=merge_mode,
+        return_dedup_info=True,
     )
 
     logger.info(
-        f"[Grounding DINO] Final verified detections after NMS: {len(final_detections)}"
+        f"[Grounding DINO] Final verified detections after NMS: {len(final_detections)} "
+        f"(raw: {dedup_stats['raw_detection_count']}, duplicates removed: {dedup_stats['duplicates_removed']})"
     )
 
     tiling_metadata = format_tile_metadata(
@@ -335,6 +346,7 @@ def detect_objects(
         tile_size=tile_size,
         overlap=overlap,
     )
+    tiling_metadata["deduplication"] = dedup_stats
 
     if return_tiling_metadata:
         return final_detections, tiling_metadata

@@ -291,3 +291,4 @@ def format_tile_metadata(
             for t in tiles_info
         ],
     }
+

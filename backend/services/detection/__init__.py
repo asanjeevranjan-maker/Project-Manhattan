@@ -34,6 +34,15 @@ from .tiler import (
     format_tile_metadata,
 )
 
+from .nms import (
+    DEFAULT_NMS_IOU_THRESHOLD,
+    DEFAULT_CLASS_NMS_THRESHOLDS,
+    get_class_nms_threshold,
+    calculate_iou,
+    apply_class_nms,
+    get_deduplication_stats,
+)
+
 __all__ = [
     "SATELLITE_CLASSES",
     "ANALYSIS_PRESETS",
@@ -59,5 +68,11 @@ __all__ = [
     "generate_tiles",
     "tile_bbox_to_global",
     "format_tile_metadata",
+    "DEFAULT_NMS_IOU_THRESHOLD",
+    "DEFAULT_CLASS_NMS_THRESHOLDS",
+    "get_class_nms_threshold",
+    "calculate_iou",
+    "apply_class_nms",
+    "get_deduplication_stats",
 ]
 
