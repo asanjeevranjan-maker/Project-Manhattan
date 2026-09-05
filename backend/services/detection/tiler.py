@@ -106,7 +106,6 @@ def calculate_tile_grid(
         effective_overlap_px = overlap_px
         effective_step = step
 
-    # Calculate precise tile bounding boxes
     tiles: List[Dict[str, int]] = []
     row = 0
     y = 0
@@ -142,9 +141,13 @@ def calculate_tile_grid(
         row += 1
 
         if len(tiles) >= max_tiles:
-            logger.warning(f"[Tiler] Reached hard tile limit of {max_tiles} tiles.")
+            logger.warning(f"[PIPELINE] [Tiler] Reached hard tile limit of {max_tiles} tiles.")
             break
 
+    logger.info(
+        f"[PIPELINE] Generated {len(tiles)} tiles for {width}x{height} image "
+        f"(tile_size={effective_tile_size}px, step={effective_step}px, overlap={effective_overlap_px}px)"
+    )
     return tiles
 
 
@@ -237,6 +240,8 @@ def tile_bbox_to_global(
     y_offset: int,
     clip_max_w: Optional[int] = None,
     clip_max_h: Optional[int] = None,
+    image_width: Optional[int] = None,
+    image_height: Optional[int] = None,
 ) -> List[float]:
     """
     Transforms bounding box from local tile coordinates into the global original image coordinates.
@@ -246,18 +251,21 @@ def tile_bbox_to_global(
         global_x2 = tile_x2 + x_offset
         global_y2 = tile_y2 + y_offset
     """
+    max_w = clip_max_w if clip_max_w is not None else image_width
+    max_h = clip_max_h if clip_max_h is not None else image_height
+
     x1, y1, x2, y2 = bbox
     gx1 = float(x1 + x_offset)
     gy1 = float(y1 + y_offset)
     gx2 = float(x2 + x_offset)
     gy2 = float(y2 + y_offset)
 
-    if clip_max_w is not None:
-        gx1 = max(0.0, min(float(clip_max_w), gx1))
-        gx2 = max(0.0, min(float(clip_max_w), gx2))
-    if clip_max_h is not None:
-        gy1 = max(0.0, min(float(clip_max_h), gy1))
-        gy2 = max(0.0, min(float(clip_max_h), gy2))
+    if max_w is not None:
+        gx1 = max(0.0, min(float(max_w), gx1))
+        gx2 = max(0.0, min(float(max_w), gx2))
+    if max_h is not None:
+        gy1 = max(0.0, min(float(max_h), gy1))
+        gy2 = max(0.0, min(float(max_h), gy2))
 
     return [round(gx1, 1), round(gy1, 1), round(gx2, 1), round(gy2, 1)]
 

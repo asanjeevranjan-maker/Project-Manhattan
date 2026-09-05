@@ -178,3 +178,4 @@ def register_temporal_scenes(
             "aligned_width": w,
             "aligned_height": h,
         }
+

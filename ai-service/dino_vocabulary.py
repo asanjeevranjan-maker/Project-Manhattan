@@ -28,6 +28,7 @@ try:
         filter_and_format_detections,
         remove_duplicate_detections,
         box_iou,
+        validate_bbox,
     )
     from services.detection.tiler import (
         TILE_SIZE,
@@ -64,6 +65,7 @@ try:
         generate_overlay_preview,
         segment_detections,
         get_sam2_predictor,
+        debug_segment_single_box,
     )
     from services.detection.land_cover import (
         LandCoverAnalyzer,
@@ -111,6 +113,7 @@ __all__ = [
     "filter_and_format_detections",
     "remove_duplicate_detections",
     "box_iou",
+    "validate_bbox",
     "TILE_SIZE",
     "TILE_OVERLAP",
     "ENABLE_TILING",
@@ -141,6 +144,7 @@ __all__ = [
     "generate_overlay_preview",
     "segment_detections",
     "get_sam2_predictor",
+    "debug_segment_single_box",
     "LandCoverAnalyzer",
     "calculate_land_cover",
     "DEFAULT_CATEGORY_PRIORITY",

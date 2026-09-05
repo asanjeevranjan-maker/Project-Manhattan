@@ -72,26 +72,41 @@ interface AnalyzeResponse {
 
 interface DinoDetection {
   label: string;
-
   confidence: number;
-
-  box: [
-    number,
-    number,
-    number,
-    number
-  ];
+  box: [number, number, number, number];
+  mask?: {
+    format?: string;
+    polygon?: [number, number][];
+    bounds?: [number, number, number, number];
+    rle?: any;
+    mask_area_pixels?: number;
+    bbox_area_pixels?: number;
+    fill_ratio?: number;
+  } | null;
+  mask_area_pixels?: number;
 }
 
 
 interface DinoResponse {
   count: number;
-
   width: number;
-
   height: number;
-
   detections: DinoDetection[];
+  mask_overlay_url?: string | null;
+  segmentation_available?: boolean;
+  segmentation?: {
+    segmentation_available?: boolean;
+    sam2_available?: boolean;
+    sam2_loaded?: boolean;
+    sam2_backend?: string;
+    device?: string;
+    model_checkpoint?: string | null;
+    failure_reason?: string | null;
+    overlay_preview?: string | null;
+    mask_overlay_url?: string | null;
+    segmented_count?: number;
+    total_detections?: number;
+  };
 }
 
 
@@ -604,46 +619,20 @@ function convertDinoToAnalysis(
   const regions =
     data.detections.map(
       (detection) => {
-
-        const [
-          x1,
-          y1,
-          x2,
-          y2,
-        ] =
-          detection.box;
-
-
+        const [x1, y1, x2, y2] = detection.box;
         return {
-          label:
-            detection.label,
-
-          color:
-            getDetectionColor(
-              detection.label,
-            ),
-
+          label: detection.label,
+          color: getDetectionColor(detection.label),
           rect: [
-            x1 /
-              data.width,
-
-            y1 /
-              data.height,
-
-            (x2 - x1) /
-              data.width,
-
-            (y2 - y1) /
-              data.height,
-          ] as [
-            number,
-            number,
-            number,
-            number,
-          ],
-
-          confidence:
-            detection.confidence,
+            x1 / data.width,
+            y1 / data.height,
+            (x2 - x1) / data.width,
+            (y2 - y1) / data.height,
+          ] as [number, number, number, number],
+          confidence: detection.confidence,
+          polygon: detection.mask?.polygon,
+          maskArea: detection.mask?.mask_area_pixels,
+          fillRatio: detection.mask?.fill_ratio,
         };
       },
     );
@@ -805,37 +794,36 @@ function convertDinoToAnalysis(
         );
 
 
+    const maskOverlay = data.mask_overlay_url || data.segmentation?.mask_overlay_url || data.segmentation?.overlay_preview || undefined;
+    const isSegAvail = data.segmentation?.sam2_available ?? data.segmentation_available ?? false;
+    const failReason = data.segmentation?.failure_reason;
+
     answer =
       `Grounding DINO detected **${data.count} object${
-        data.count ===
-        1
-          ? ''
-          : 's'
+        data.count === 1 ? '' : 's'
       }** in the image.\n\n` +
-
       `Detected: ${summary}.\n\n` +
-
-      'The detected regions are marked on the image.';
+      (maskOverlay
+        ? 'Precise segmentation masks and bounding boxes are overlaid on the image.'
+        : isSegAvail === false && failReason
+        ? `*Note: SAM segmentation was unavailable (${failReason}). Showing Grounding DINO bounding boxes.*`
+        : 'The detected regions are marked on the image.');
   }
 
+  const maskOverlay = data.mask_overlay_url || data.segmentation?.mask_overlay_url || data.segmentation?.overlay_preview || undefined;
+  const isSegAvail = data.segmentation?.sam2_available ?? data.segmentation_available ?? false;
+  const failReason = data.segmentation?.failure_reason;
 
   return {
     answer,
-
-    intent:
-      getDetectionIntent(
-        query,
-      ),
-
+    intent: getDetectionIntent(query),
     objectsDetected,
-
-    confidence:
-      overallConfidence,
-
-    coverage:
-      [],
-
+    confidence: overallConfidence,
+    coverage: [],
     regions,
+    maskOverlayUrl: maskOverlay,
+    segmentationAvailable: isSegAvail,
+    segmentationFailureReason: failReason || undefined,
   };
 }
 

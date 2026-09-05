@@ -37,8 +37,9 @@ DEFAULT_CLASS_NMS_THRESHOLDS: Dict[str, float] = {
     "vehicle": 0.40,
     "car": 0.40,
     "truck": 0.40,
+    "ship": 0.45,
     "boat": 0.40,
-    "vessel": 0.40,
+    "vessel": 0.45,
     "airplane": 0.40,
     "aircraft": 0.40,
     # Elongated infrastructure: 0.35 handles connected road segments
@@ -229,6 +230,7 @@ def apply_class_nms(
     class_thresholds: Optional[Dict[str, float]] = None,
     merge_mode: str = "standard",
     return_debug_info: bool = False,
+    default_iou_threshold: Optional[float] = None,
 ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, int]]]:
     """
     Applies class-aware Non-Maximum Suppression (NMS) to eliminate duplicate detections.
@@ -255,6 +257,9 @@ def apply_class_nms(
     Returns:
         List of deduplicated detections, or tuple of (detections, debug_stats).
     """
+    if iou_threshold is None and default_iou_threshold is not None:
+        iou_threshold = default_iou_threshold
+
     if not detections:
         stats = get_deduplication_stats(0, 0)
         return ([], stats) if return_debug_info else []
@@ -325,9 +330,9 @@ def apply_class_nms(
     final_count = len(final_detections)
     stats = get_deduplication_stats(raw_count, final_count)
 
-    logger.debug(
-        f"[NMS] Raw detections: {raw_count} | Final kept: {final_count} | "
-        f"Duplicates removed: {stats['duplicates_removed']}"
+    logger.info(
+        f"[NMS] Raw candidates: {raw_count} -> Kept after class NMS: {final_count} "
+        f"(duplicates removed: {stats['duplicates_removed']})"
     )
 
     if return_debug_info:

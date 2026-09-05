@@ -59,6 +59,7 @@ from dino_vocabulary import (
     ENABLE_VERIFICATION,
     VERIFICATION_THRESHOLD,
     verify_detections,
+    validate_bbox,
 )
 
 logger = logging.getLogger("satquery.grounding_dino")
@@ -69,8 +70,8 @@ if not logger.handlers:
 MODEL_ID = "IDEA-Research/grounding-dino-base"
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-logger.info(f"Using compute device: {device}")
-logger.info(f"Loading Grounding DINO model: {MODEL_ID}")
+logger.info(f"[DINO] Using compute device: {device}")
+logger.info(f"[DINO] Loading Grounding DINO model: {MODEL_ID}")
 
 processor = AutoProcessor.from_pretrained(MODEL_ID)
 model = AutoModelForZeroShotObjectDetection.from_pretrained(MODEL_ID).to(device)
@@ -83,8 +84,8 @@ model.eval()
 BASE_BOX_THRESHOLD = 0.25      # Broad candidate collection; filtered by class thresholds
 BASE_TEXT_THRESHOLD = 0.22     # Text matching threshold
 NMS_IOU_THRESHOLD = 0.25       # IoU for deduplicating overlapping detections of the same class
-TILE_SIZE = 512
-TILE_OVERLAP = 96
+TILE_SIZE = 1024
+TILE_OVERLAP = 0.15
 
 
 # ------------------------------------------------
@@ -209,8 +210,10 @@ def run_model_on_image(
 
         box_list = [float(v) for v in box_tensor.tolist()]
 
-        # 3. Geometric bounds check
-        if not valid_box(box_list, image.width, image.height):
+        # 3. Geometric bounds check via validate_bbox
+        is_valid, reason = validate_bbox(box_list, image.width, image.height, min_dimension=4.0)
+        if not is_valid:
+            logger.debug(f"[DINO] Discarding {canonical_label!r} box {box_list}: {reason}")
             continue
 
         # 4. Class-specific geometry check
@@ -261,7 +264,7 @@ def detect_objects(
     # 1. Sanitize prompt (translate abstract queries or presets to observable classes)
     clean_prompt = sanitize_prompt(prompt, preset=preset)
     logger.info(
-        f"[Grounding DINO] Processing Image ({full_width}x{full_height}) | "
+        f"[PIPELINE] Processing Image ({full_width}x{full_height}) | "
         f"Raw query: {prompt!r} | Preset: {preset!r} | Sanitized: {clean_prompt!r}"
     )
 
@@ -278,8 +281,8 @@ def detect_objects(
 
     if will_tile:
         logger.info(
-            f"[Grounding DINO] Tiling ACTIVATED for {full_width}x{full_height} image "
-            f"(tile_size={tile_size}px, overlap={int(overlap*100)}%, max_tiles={max_tiles})."
+            f"[PIPELINE] Tiling ACTIVATED for {full_width}x{full_height} image "
+            f"(tile_size={tile_size}px, overlap={int(overlap*100) if overlap < 1.0 else int(overlap)}%, max_tiles={max_tiles})."
         )
         for tile_dict in iter_tiles(
             image=image,
@@ -313,10 +316,16 @@ def detect_objects(
                     clip_max_h=full_height,
                 )
                 det["box"] = global_box
+                det["bbox"] = global_box
                 all_detections.append(det)
+
+            logger.info(
+                f"[PIPELINE] Tile {t_id} (offset=({ox},{oy}), size={tile_dict['width']}x{tile_dict['height']}): "
+                f"{len(raw_tile_dets)} raw detections translated to global coordinates."
+            )
     else:
         logger.info(
-            f"[Grounding DINO] Direct single-tile inference for {full_width}x{full_height} image "
+            f"[PIPELINE] Direct single-tile inference for {full_width}x{full_height} image "
             f"(tiling bypassed or below min size {MIN_IMAGE_SIZE_FOR_TILING}px)."
         )
         raw_dets = run_model_on_image(image, clean_prompt)
@@ -330,8 +339,10 @@ def detect_objects(
         })
         all_detections = raw_dets
 
+    from collections import Counter
+    counts_by_class = Counter([d.get("label", "unknown") for d in all_detections])
     logger.info(
-        f"[Grounding DINO] Total raw candidates across tiles: {len(all_detections)}"
+        f"[PIPELINE] [DINO] Total raw candidates across tiles: {len(all_detections)} | By class: {dict(counts_by_class)}"
     )
 
     # 3. Format and deduplicate via Global Class-Aware NMS
@@ -344,9 +355,11 @@ def detect_objects(
         return_dedup_info=True,
     )
 
+    final_by_class = Counter([d.get("label", "unknown") for d in final_detections])
     logger.info(
-        f"[Grounding DINO] Detections after NMS: {len(final_detections)} "
-        f"(raw: {dedup_stats['raw_detection_count']}, duplicates removed: {dedup_stats['duplicates_removed']})"
+        f"[PIPELINE] [NMS] Kept {len(final_detections)} detections after class NMS "
+        f"(raw: {dedup_stats['raw_detection_count']}, duplicates removed: {dedup_stats['duplicates_removed']}) | "
+        f"Final classes: {dict(final_by_class)}"
     )
 
     # 3.5 Secondary Detection Verification using SigLIP (reduces false positives)
@@ -361,19 +374,33 @@ def detect_objects(
     # 4. Optional SAM2-based segmentation on verified detections
     run_segmentation = ENABLE_SEGMENTATION if enable_segmentation is None else bool(enable_segmentation)
     if run_segmentation and final_detections:
+        logger.info(f"[PIPELINE] [SAM2] Initiating segmentation on {len(final_detections)} detections...")
         final_detections, seg_metadata = segment_detections(
             image=image,
             detections=final_detections,
             enable_segmentation=True,
         )
+        logger.info(
+            f"[PIPELINE] [SAM2] Segmentation completed. Available={seg_metadata.get('sam2_available')}, "
+            f"Segmented={seg_metadata.get('segmented_count')}/{len(final_detections)}"
+        )
     else:
+        predictor = get_sam2_predictor()
+        diag = predictor.get_diagnostics() if hasattr(predictor, "get_diagnostics") else {}
         seg_metadata = {
-            "segmentation_available": SAM2_AVAILABLE,
+            "segmentation_available": diag.get("sam2_available", SAM2_AVAILABLE),
+            "sam2_available": diag.get("sam2_available", SAM2_AVAILABLE),
+            "sam2_loaded": diag.get("sam2_loaded", False),
+            "sam2_backend": diag.get("sam2_backend", "none"),
+            "device": diag.get("device", "cpu"),
+            "model_checkpoint": diag.get("model_checkpoint"),
+            "failure_reason": diag.get("failure_reason") if not diag.get("sam2_available") else None,
             "enabled": run_segmentation,
             "segmented_count": 0,
             "total_detections": len(final_detections),
-            "backend": None,
+            "backend": diag.get("sam2_backend", "none"),
             "overlay_preview": None,
+            "mask_overlay_url": None,
         }
 
     # 5. Objective Land-Cover Coverage Calculation (truthful pixel accounting)

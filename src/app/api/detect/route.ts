@@ -53,9 +53,27 @@ export async function POST(req: NextRequest) {
         if (preset) {
           formData.append("preset", preset);
         }
+        if (body.use_tiles !== undefined) {
+          formData.append("use_tiles", String(body.use_tiles));
+        }
+        if (body.iou_threshold !== undefined) {
+          formData.append("iou_threshold", String(body.iou_threshold));
+        }
+        if (body.merge_mode !== undefined) {
+          formData.append("merge_mode", String(body.merge_mode));
+        }
+        if (body.enable_segmentation !== undefined) {
+          formData.append("enable_segmentation", String(body.enable_segmentation));
+        }
+        if (body.enable_verification !== undefined) {
+          formData.append("enable_verification", String(body.enable_verification));
+        }
+        if (body.verification_threshold !== undefined) {
+          formData.append("verification_threshold", String(body.verification_threshold));
+        }
 
         const controller = new AbortController();
-        const timeoutMs = aiServiceUrl.includes("127.0.0.1") || aiServiceUrl.includes("localhost") ? 3500 : 30000;
+        const timeoutMs = 120000; // 120 seconds to allow DINO + tiling + SAM2 completion
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
         const response = await fetch(`${aiServiceUrl}/detect`, {

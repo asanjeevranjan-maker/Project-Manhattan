@@ -25,6 +25,17 @@ logger = logging.getLogger("satquery.detection.segmentation")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
 
+try:
+    from .vocabulary import validate_bbox
+except ImportError:
+    try:
+        from services.detection.vocabulary import validate_bbox
+    except ImportError:
+        def validate_bbox(box, w, h, min_dimension=2.0, max_area_ratio=None):
+            if not box or len(box) != 4:
+                return False, "Invalid box format"
+            return True, None
+
 
 # =====================================================================
 # 1. RUNTIME DETECTION & OPTIONAL IMPORTS
@@ -95,7 +106,7 @@ DEFAULT_SEGMENTABLE_CLASSES: Set[str] = {
     # Construction & Earthworks
     "construction", "construction site",
     # Infrastructure & Transport
-    "road", "bridge", "runway", "vehicle", "car", "truck", "boat", "vessel", "airplane", "aircraft",
+    "road", "bridge", "runway", "vehicle", "car", "truck", "boat", "vessel", "ship", "airplane", "aircraft",
 }
 
 # Color palette for segmentation overlay masks (RGBA)
@@ -123,6 +134,7 @@ CLASS_OVERLAY_COLORS: Dict[str, Tuple[int, int, int, int]] = {
     "truck": (249, 115, 22, 130),
     "boat": (168, 85, 247, 120),            # Purple
     "vessel": (168, 85, 247, 120),
+    "ship": (168, 85, 247, 120),            # Purple
     "airplane": (236, 72, 153, 120),        # Pink
     "aircraft": (236, 72, 153, 120),
     "default": (147, 51, 234, 110),         # Violet default
@@ -344,7 +356,7 @@ def generate_overlay_preview(
 class SAM2PredictorWrapper:
     """
     Encapsulates SAM2 / SAM predictor initialization and inference.
-    Supports CUDA / CPU selection and proper memory clearing.
+    Supports CUDA / CPU selection, proper memory clearing, and rich diagnostic inspection.
     """
     def __init__(
         self,
@@ -357,24 +369,49 @@ class SAM2PredictorWrapper:
         self.device = device or ("cuda" if (TORCH_AVAILABLE and torch.cuda.is_available()) else "cpu")
         self._predictor = None
         self._initialized = False
+        self._failure_reason: Optional[str] = None
 
     def is_available(self) -> bool:
-        if not SAM2_AVAILABLE or not TORCH_AVAILABLE:
+        if not TORCH_AVAILABLE:
+            self._failure_reason = "PyTorch is not available in the current environment."
             return False
-        # If checkpoint file does not exist on disk, model weights are missing
+        if not SAM2_AVAILABLE or not SAM2_BACKEND:
+            self._failure_reason = (
+                "Neither 'sam2' nor 'segment_anything' package is installed in the Python environment. "
+                "Install via 'pip install segment-anything' or 'pip install git+https://github.com/facebookresearch/sam2'."
+            )
+            return False
         if self.checkpoint and not os.path.exists(self.checkpoint):
+            self._failure_reason = (
+                f"Model checkpoint not found at '{self.checkpoint}'. Download weights or configure SAM2_CHECKPOINT. "
+                "For SAM2: https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_tiny.pt "
+                "For SAM: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+            )
             return False
         return True
+
+    def get_diagnostics(self) -> Dict[str, Any]:
+        """Returns standard runtime diagnostic inspection dictionary."""
+        available = self.is_available()
+        return {
+            "sam2_available": available,
+            "sam2_loaded": self._initialized,
+            "sam2_backend": SAM2_BACKEND or "none",
+            "device": self.device,
+            "model_checkpoint": self.checkpoint if (self.checkpoint and os.path.exists(self.checkpoint)) else None,
+            "failure_reason": self._failure_reason if not available else None,
+        }
 
     def initialize(self) -> bool:
         """Loads weights lazily on first inference call."""
         if self._initialized:
             return True
         if not self.is_available():
+            logger.warning(f"[SAM2] Cannot initialize: {self._failure_reason}")
             return False
 
         try:
-            logger.info(f"[SAM2] Initializing model ({SAM2_BACKEND}) on {self.device}...")
+            logger.info(f"[SAM2] Initializing model ({SAM2_BACKEND}) on {self.device} from '{self.checkpoint}'...")
             if SAM2_BACKEND == "sam2":
                 model = build_sam2(self.config, self.checkpoint, device=self.device)
                 self._predictor = SAM2ImagePredictor(model)
@@ -383,10 +420,11 @@ class SAM2PredictorWrapper:
                 self._predictor = SamPredictor(model)
 
             self._initialized = True
-            logger.info("[SAM2] Model successfully initialized.")
+            logger.info(f"[SAM2] Model successfully initialized on {self.device}.")
             return True
         except Exception as e:
-            logger.warning(f"[SAM2] Initialization failed: {e}")
+            self._failure_reason = f"Initialization exception: {e}"
+            logger.error(f"[SAM2] Initialization failed: {e}", exc_info=True)
             self._initialized = False
             return False
 
@@ -431,7 +469,7 @@ class SAM2PredictorWrapper:
             return _run()
 
         except Exception as e:
-            logger.warning(f"[SAM2] Predict error on box {box_xyxy}: {e}")
+            logger.warning(f"[SAM2] Predict error on box {box_xyxy}: {e}", exc_info=True)
             return None, 0.0
 
 
@@ -476,16 +514,26 @@ def segment_detections(
         (segmented_detections, segmentation_metadata)
     """
     total_count = len(detections) if detections else 0
+    predictor = predictor_override or get_sam2_predictor()
+    diag = predictor.get_diagnostics() if hasattr(predictor, "get_diagnostics") else {}
 
     # Fallback response template when segmentation cannot or should not run
-    def _create_fallback_response(available: bool, enabled: bool) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def _create_fallback_response(available: bool, enabled: bool, failure_reason: Optional[str] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        backend_name = diag.get("sam2_backend") or getattr(predictor, "backend", None) or SAM2_BACKEND or "none"
         meta = {
             "segmentation_available": available,
+            "sam2_available": available,
+            "sam2_loaded": diag.get("sam2_loaded", False),
+            "sam2_backend": backend_name,
+            "device": diag.get("device", getattr(predictor, "device", "cpu")),
+            "model_checkpoint": diag.get("model_checkpoint"),
+            "failure_reason": failure_reason or diag.get("failure_reason"),
             "enabled": enabled,
             "segmented_count": 0,
             "total_detections": total_count,
-            "backend": SAM2_BACKEND if available else None,
+            "backend": backend_name,
             "overlay_preview": None,
+            "mask_overlay_url": None,
         }
         # Guarantee each detection has mask=None and mask_area_pixels=0 for schema consistency
         clean_dets = []
@@ -498,15 +546,15 @@ def segment_detections(
 
     # 1. Check if segmentation was explicitly disabled
     if not enable_segmentation:
-        logger.info("[Segmentation] Segmentation explicitly disabled by caller.")
+        logger.info("[SAM2] Segmentation explicitly disabled by caller.")
         return _create_fallback_response(available=SAM2_AVAILABLE, enabled=False)
 
     # 2. Check if predictor is available (or caller provided mock)
-    predictor = predictor_override or get_sam2_predictor()
     is_avail = getattr(predictor, "is_available", lambda: True)()
     if not is_avail:
-        logger.info("[Segmentation] SAM2 model/weights unavailable. Returning Grounding DINO detections normally.")
-        return _create_fallback_response(available=False, enabled=True)
+        reason = diag.get("failure_reason") or "SAM2 predictor unavailable"
+        logger.warning(f"[SAM2] Segmentation unavailable: {reason}. Returning Grounding DINO detections normally.")
+        return _create_fallback_response(available=False, enabled=True, failure_reason=reason)
 
     if not detections:
         return _create_fallback_response(available=True, enabled=True)
@@ -532,28 +580,71 @@ def segment_detections(
                 segmented_detections.append(det_copy)
                 continue
 
-            # Run SAM2 prediction on bounding box prompt
+            # Validate bounding box against full image boundaries before calling SAM
+            is_valid, val_reason = validate_bbox(box, img_rgb.width, img_rgb.height, min_dimension=2.0)
+            if not is_valid:
+                logger.warning(f"[SAM2] Rejecting box for '{label}' before segmentation: {box} ({val_reason})")
+                det_copy["mask"] = None
+                det_copy["mask_area_pixels"] = 0
+                segmented_detections.append(det_copy)
+                continue
+
             box_xyxy = [float(b) for b in box]
-            raw_mask, _ = predictor.predict_mask(image_np=np_img, box_xyxy=box_xyxy)
+            bw = max(1.0, box_xyxy[2] - box_xyxy[0])
+            bh = max(1.0, box_xyxy[3] - box_xyxy[1])
+            bbox_area_pixels = bw * bh
+
+            logger.info(
+                f"[SAM2] Prompting model for '{label}' box={box_xyxy} "
+                f"(bbox_area={bbox_area_pixels:.1f}px, image={img_rgb.width}x{img_rgb.height})"
+            )
+
+            # Run SAM2 prediction on bounding box prompt
+            raw_mask, score = predictor.predict_mask(image_np=np_img, box_xyxy=box_xyxy)
 
             if raw_mask is not None:
                 poly = mask_to_polygon(raw_mask, box=box_xyxy)
                 rle = mask_to_rle(raw_mask)
                 bounds = compute_mask_bounds(poly)
                 area = compute_mask_area(raw_mask, polygon=poly)
+                fill_ratio = area / float(bbox_area_pixels)
+
+                if fill_ratio > 0.95:
+                    logger.warning(
+                        f"[SAM2] High fill_ratio ({fill_ratio:.2f} > 0.95) for '{label}' box {box_xyxy}. "
+                        "Mask covers nearly entire box (possible box-shaped fallback)."
+                    )
+                elif fill_ratio < 0.01:
+                    logger.warning(
+                        f"[SAM2] Low fill_ratio ({fill_ratio:.4f} < 0.01) for '{label}' box {box_xyxy}. "
+                        "Mask is very sparse or empty."
+                    )
+                else:
+                    logger.info(
+                        f"[SAM2] Mask generated for '{label}': area={area}px, fill_ratio={fill_ratio:.3f}, "
+                        f"points={len(poly)}, bounds={bounds}"
+                    )
 
                 det_copy["mask"] = {
                     "format": "polygon",
                     "polygon": poly,
                     "bounds": bounds,
                     "rle": rle,
+                    "mask_area_pixels": area,
+                    "bbox_area_pixels": round(bbox_area_pixels, 1),
+                    "fill_ratio": round(fill_ratio, 3),
                 }
                 det_copy["mask_area_pixels"] = area
+                det_copy["bbox_area_pixels"] = round(bbox_area_pixels, 1)
+                det_copy["fill_ratio"] = round(fill_ratio, 3)
                 segmented_count += 1
             else:
                 # If SAM failed for this specific box, provide clean fallback without crashing
+                logger.warning(f"[SAM2] Predictor returned no mask for box {box_xyxy} ('{label}')")
                 det_copy["mask"] = None
                 det_copy["mask_area_pixels"] = 0
+                det_copy["bbox_area_pixels"] = round(bbox_area_pixels, 1)
+                det_copy["fill_ratio"] = None
 
             segmented_detections.append(det_copy)
 
@@ -570,24 +661,125 @@ def segment_detections(
         if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        backend_name = diag.get("sam2_backend") or getattr(predictor, "backend", None) or SAM2_BACKEND or "custom"
         metadata = {
             "segmentation_available": True,
+            "sam2_available": True,
+            "sam2_loaded": diag.get("sam2_loaded", getattr(predictor, "_initialized", True)),
+            "sam2_backend": backend_name,
+            "device": diag.get("device", getattr(predictor, "device", "cpu")),
+            "model_checkpoint": diag.get("model_checkpoint"),
+            "failure_reason": None,
             "enabled": True,
             "segmented_count": segmented_count,
             "total_detections": total_count,
-            "backend": getattr(predictor, "backend", SAM2_BACKEND or "custom"),
+            "backend": backend_name,
             "overlay_preview": overlay_preview,
+            "mask_overlay_url": overlay_preview,
         }
 
         logger.info(
-            f"[Segmentation] Successfully segmented {segmented_count}/{total_count} detections. "
+            f"[SAM2] Successfully segmented {segmented_count}/{total_count} detections. "
             f"Overlay generated: {overlay_preview is not None}."
         )
 
         return segmented_detections, metadata
 
     except Exception as error:
-        logger.error(f"[Segmentation] Error during segmentation execution: {error}", exc_info=True)
+        logger.error(f"[SAM2] Error during segmentation execution: {error}", exc_info=True)
         # Never crash: fall back to unsegmented detections
-        return _create_fallback_response(available=True, enabled=True)
+        return _create_fallback_response(available=True, enabled=True, failure_reason=str(error))
+
+
+# =====================================================================
+# 7. ISOLATED DEBUG SEGMENTATION HELPER
+# =====================================================================
+def debug_segment_single_box(
+    image: Image.Image,
+    box_xyxy: Optional[List[float]] = None,
+    label: str = "ship",
+    predictor_override: Optional[Any] = None,
+    bbox_xyxy: Optional[List[float]] = None,
+) -> Dict[str, Any]:
+    """
+    Dedicated debug helper for isolated SAM testing (Phase 11).
+    Tests SAM on a single box prompt without running Grounding DINO or tiling.
+    """
+    box = box_xyxy if box_xyxy is not None else bbox_xyxy
+    if box is None:
+        raise ValueError("Either box_xyxy or bbox_xyxy must be provided")
+
+    import time
+    start_t = time.time()
+    logs: List[str] = []
+
+    img_rgb = image.convert("RGB")
+    w, h = img_rgb.size
+    logs.append(f"[DEBUG] Image dimensions: {w}x{h} px")
+
+    is_valid, reason = validate_bbox(box, w, h, min_dimension=1.0)
+    logs.append(f"[DEBUG] Box validation: valid={is_valid} ({reason or 'OK'})")
+
+    predictor = predictor_override or get_sam2_predictor()
+    diag = predictor.get_diagnostics() if hasattr(predictor, "get_diagnostics") else {}
+    logs.append(f"[DEBUG] Diagnostics: available={diag.get('sam2_available')}, backend={diag.get('sam2_backend')}, reason={diag.get('failure_reason')}")
+
+    # Crop original box for preview
+    x1, y1, x2, y2 = [int(round(v)) for v in box]
+    pad = 12
+    cx1, cy1 = max(0, x1 - pad), max(0, y1 - pad)
+    cx2, cy2 = min(w, x2 + pad), min(h, y2 + pad)
+    crop = img_rgb.crop((cx1, cy1, cx2, cy2))
+
+    buf = io.BytesIO()
+    crop.save(buf, format="PNG")
+    crop_data_url = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+
+    bw = max(1.0, float(x2 - x1))
+    bh = max(1.0, float(y2 - y1))
+    bbox_area = bw * bh
+
+    det_item = {
+        "id": "debug-det-1",
+        "label": label,
+        "box": box,
+        "bbox": box,
+        "score": 1.0,
+        "confidence": 1.0,
+    }
+
+    segmented_dets, seg_meta = segment_detections(
+        image=img_rgb,
+        detections=[det_item],
+        enable_segmentation=True,
+        predictor_override=predictor,
+    )
+
+    det_res = segmented_dets[0]
+    mask_obj = det_res.get("mask")
+    mask_area = det_res.get("mask_area_pixels", 0)
+    fill_ratio = (mask_area / float(bbox_area)) if bbox_area > 0 else 0.0
+
+    elapsed_ms = round((time.time() - start_t) * 1000, 1)
+    logs.append(f"[DEBUG] Completed in {elapsed_ms}ms. Mask area={mask_area}px, fill_ratio={fill_ratio:.3f}")
+
+    return {
+        "success": mask_obj is not None,
+        "label": label,
+        "box": box,
+        "fill_ratio": round(fill_ratio, 3),
+        "image_size": [w, h],
+        "crop_data_url": crop_data_url,
+        "mask_overlay_url": seg_meta.get("mask_overlay_url") or seg_meta.get("overlay_preview"),
+        "mask_metrics": {
+            "mask_area_pixels": mask_area,
+            "bbox_area_pixels": round(bbox_area, 1),
+            "fill_ratio": round(fill_ratio, 3),
+            "polygon_points": len(mask_obj.get("polygon", [])) if mask_obj else 0,
+            "bounds": mask_obj.get("bounds") if mask_obj else None,
+        },
+        "diagnostics": seg_meta,
+        "elapsed_ms": elapsed_ms,
+        "logs": logs,
+    }
 

@@ -121,3 +121,4 @@ def generate_bitemporal_overlays(
         "after_overlay_url": _image_to_data_url(after_canvas),
         "change_overlay_url": _image_to_data_url(change_canvas),
     }
+

@@ -150,3 +150,4 @@ def fuse_optical_and_sar(
     )
 
     return fused_rgb, metadata
+

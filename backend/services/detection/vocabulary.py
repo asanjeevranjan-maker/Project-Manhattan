@@ -152,6 +152,89 @@ STOPWORDS: Set[str] = {
 
 
 # =====================================================================
+import math
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional, Any, Set, Union
+
+logger = logging.getLogger("satquery.detection.vocabulary")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
+
+
+# =====================================================================
+# GEOMETRY & BOUNDING BOX VALIDATION
+# =====================================================================
+def validate_bbox(
+    box: List[float],
+    image_width: Optional[int] = None,
+    image_height: Optional[int] = None,
+    min_dimension: float = 2.0,
+    max_area_ratio: Optional[float] = None,
+    img_w: Optional[int] = None,
+    img_h: Optional[int] = None,
+) -> Tuple[bool, Optional[str]]:
+    """
+    Validates a bounding box [x1, y1, x2, y2] against image boundaries.
+
+    Verifications:
+    1. Exactly 4 numeric coordinates.
+    2. Finite coordinates (no NaN / Inf).
+    3. Proper ordering: x1 < x2 and y1 < y2.
+    4. Non-degenerate: (x2 - x1) >= min_dimension and (y2 - y1) >= min_dimension.
+    5. Within bounds: box is inside or overlaps [0, image_width] x [0, image_height].
+    6. Non-zero area and not covering 100% or more of whole image.
+    7. Optional class-specific max_area_ratio ceiling.
+
+    Returns:
+        (is_valid, failure_reason)
+    """
+    w = image_width if image_width is not None else img_w
+    h = image_height if image_height is not None else img_h
+    if w is None or h is None:
+        return False, "Missing image dimensions (image_width / image_height)"
+
+    image_width = w
+    image_height = h
+    if not box or len(box) != 4:
+        return False, "Box must contain exactly 4 coordinates [x1, y1, x2, y2]"
+
+    try:
+        x1, y1, x2, y2 = [float(v) for v in box]
+    except (ValueError, TypeError):
+        return False, "Box coordinates must be numeric"
+
+    if any(math.isnan(v) or math.isinf(v) for v in (x1, y1, x2, y2)):
+        return False, "Box contains NaN or Inf values"
+
+    if image_width <= 0 or image_height <= 0:
+        return False, f"Invalid image dimensions: {image_width}x{image_height}"
+
+    bw = x2 - x1
+    bh = y2 - y1
+
+    if bw <= 0 or bh <= 0:
+        return False, f"Non-positive dimensions: width={bw:.1f}, height={bh:.1f}"
+
+    if bw < min_dimension or bh < min_dimension:
+        return False, f"Degenerate dimensions under {min_dimension}px: width={bw:.1f}, height={bh:.1f}"
+
+    # Check that box is not completely outside image boundaries
+    if x2 <= 0 or y2 <= 0 or x1 >= image_width or y1 >= image_height:
+        return False, f"Box [{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}] completely outside image ({image_width}x{image_height})"
+
+    image_area = image_width * image_height
+    box_area = bw * bh
+
+    if box_area >= image_area:
+        return False, f"Box area ({box_area:.1f}px) covers entire image or larger ({image_area}px)"
+
+    if max_area_ratio is not None and (box_area / float(image_area)) > max_area_ratio:
+        return False, f"Box area ratio ({box_area / float(image_area):.3f}) exceeds max_area_ratio ({max_area_ratio:.3f})"
+
+    return True, None
+
+
+# =====================================================================
 # 4. CLASS-SPECIFIC CONFIGURABLE THRESHOLDS
 # =====================================================================
 @dataclass
@@ -159,28 +242,28 @@ class ClassThreshold:
     box_threshold: float
     text_threshold: float
     min_score: float
-    max_area_ratio: float = 0.15
+    max_area_ratio: float = 0.25
     min_area_pixels: int = 64  # min 8x8 px
     min_aspect: float = 0.05
     max_aspect: float = 20.0
 
 
 DEFAULT_CLASS_THRESHOLDS: Dict[str, ClassThreshold] = {
-    # Dense rooftop structures
+    # Dense rooftop structures: max 25% of image area
     "building": ClassThreshold(
         box_threshold=0.32,
         text_threshold=0.25,
         min_score=0.35,
-        max_area_ratio=0.15,
+        max_area_ratio=0.25,
         min_aspect=0.20,
         max_aspect=5.0,
     ),
-    # Compact mobile objects (small footprint)
+    # Compact mobile objects (small footprint): max 5% of image area
     "vehicle": ClassThreshold(
         box_threshold=0.30,
         text_threshold=0.25,
         min_score=0.32,
-        max_area_ratio=0.025,
+        max_area_ratio=0.05,
         min_aspect=0.25,
         max_aspect=4.0,
     ),
@@ -189,7 +272,7 @@ DEFAULT_CLASS_THRESHOLDS: Dict[str, ClassThreshold] = {
         box_threshold=0.28,
         text_threshold=0.24,
         min_score=0.30,
-        max_area_ratio=0.12,
+        max_area_ratio=0.20,
         min_aspect=0.05,
         max_aspect=20.0,
     ),
@@ -197,7 +280,7 @@ DEFAULT_CLASS_THRESHOLDS: Dict[str, ClassThreshold] = {
         box_threshold=0.28,
         text_threshold=0.24,
         min_score=0.30,
-        max_area_ratio=0.12,
+        max_area_ratio=0.20,
         min_aspect=0.05,
         max_aspect=20.0,
     ),
@@ -205,7 +288,7 @@ DEFAULT_CLASS_THRESHOLDS: Dict[str, ClassThreshold] = {
         box_threshold=0.32,
         text_threshold=0.25,
         min_score=0.35,
-        max_area_ratio=0.12,
+        max_area_ratio=0.15,
         min_aspect=0.10,
         max_aspect=15.0,
     ),
@@ -214,7 +297,7 @@ DEFAULT_CLASS_THRESHOLDS: Dict[str, ClassThreshold] = {
         box_threshold=0.26,
         text_threshold=0.22,
         min_score=0.28,
-        max_area_ratio=0.20,
+        max_area_ratio=0.25,
         min_aspect=0.05,
         max_aspect=20.0,
     ),
@@ -222,7 +305,7 @@ DEFAULT_CLASS_THRESHOLDS: Dict[str, ClassThreshold] = {
         box_threshold=0.26,
         text_threshold=0.22,
         min_score=0.28,
-        max_area_ratio=0.30,
+        max_area_ratio=0.35,
         min_aspect=0.10,
         max_aspect=10.0,
     ),
@@ -231,38 +314,38 @@ DEFAULT_CLASS_THRESHOLDS: Dict[str, ClassThreshold] = {
         box_threshold=0.30,
         text_threshold=0.25,
         min_score=0.32,
-        max_area_ratio=0.25,
+        max_area_ratio=0.35,
     ),
     "forest": ClassThreshold(
         box_threshold=0.30,
         text_threshold=0.25,
         min_score=0.32,
-        max_area_ratio=0.30,
+        max_area_ratio=0.35,
     ),
     "field": ClassThreshold(
         box_threshold=0.28,
         text_threshold=0.24,
         min_score=0.30,
-        max_area_ratio=0.30,
+        max_area_ratio=0.35,
     ),
     "bare soil": ClassThreshold(
         box_threshold=0.28,
         text_threshold=0.24,
         min_score=0.30,
-        max_area_ratio=0.25,
+        max_area_ratio=0.30,
     ),
     "construction area": ClassThreshold(
         box_threshold=0.30,
         text_threshold=0.25,
         min_score=0.32,
-        max_area_ratio=0.20,
+        max_area_ratio=0.25,
     ),
-    # Maritime & aviation
+    # Maritime & aviation: ship max 15% of image area (rejects full harbor/bay false positives)
     "ship": ClassThreshold(
         box_threshold=0.32,
         text_threshold=0.25,
         min_score=0.35,
-        max_area_ratio=0.12,
+        max_area_ratio=0.15,
         min_aspect=0.15,
         max_aspect=8.0,
     ),
@@ -270,7 +353,7 @@ DEFAULT_CLASS_THRESHOLDS: Dict[str, ClassThreshold] = {
         box_threshold=0.32,
         text_threshold=0.25,
         min_score=0.35,
-        max_area_ratio=0.06,
+        max_area_ratio=0.08,
         min_aspect=0.20,
         max_aspect=5.0,
     ),
@@ -286,7 +369,7 @@ DEFAULT_CLASS_THRESHOLDS: Dict[str, ClassThreshold] = {
         box_threshold=0.30,
         text_threshold=0.25,
         min_score=0.32,
-        max_area_ratio=0.15,
+        max_area_ratio=0.20,
     ),
 }
 
@@ -472,30 +555,34 @@ def format_detection(
     if not canonical_label:
         return None
 
-    # 2. Geometry bounds check
-    x1, y1, x2, y2 = box
-    bw = x2 - x1
-    bh = y2 - y1
-    if bw <= 0 or bh <= 0:
-        return None
-
-    # 3. Class-specific threshold check
+    # 2. Class-specific threshold lookup
     thresholds_map = custom_thresholds or DEFAULT_CLASS_THRESHOLDS
     thresh = thresholds_map.get(canonical_label, thresholds_map.get("default", DEFAULT_CLASS_THRESHOLDS["default"]))
 
     if score < thresh.min_score:
+        logger.debug(f"[DINO] Rejected '{canonical_label}': score {score:.3f} < min {thresh.min_score:.3f}")
         return None
 
-    # 4. Aspect ratio and area ratio checks
-    area = bw * bh
-    image_area = max(1, width * height)
-    area_ratio = area / float(image_area)
-
-    if area_ratio > thresh.max_area_ratio:
+    # 3. Comprehensive bounding box validation
+    is_valid, reason = validate_bbox(
+        box=box,
+        image_width=width,
+        image_height=height,
+        min_dimension=2.0,
+        max_area_ratio=thresh.max_area_ratio,
+    )
+    if not is_valid:
+        logger.debug(f"[DINO] Rejected box for '{canonical_label}': {reason}")
         return None
 
+    x1, y1, x2, y2 = [float(v) for v in box]
+    bw = x2 - x1
+    bh = y2 - y1
+
+    # 4. Aspect ratio check
     aspect = bw / float(bh) if bh > 0 else 0.0
     if aspect < thresh.min_aspect or aspect > thresh.max_aspect:
+        logger.debug(f"[DINO] Rejected '{canonical_label}': aspect {aspect:.2f} outside [{thresh.min_aspect:.2f}, {thresh.max_aspect:.2f}]")
         return None
 
     # 5. Spatial location & center point

@@ -187,7 +187,23 @@ export interface AnalysisResult {
     ];
 
     confidence: number;
+
+    // Optional segmentation mask polygon vertices [[x, y], ...]
+    polygon?: [number, number][];
+
+    // Foreground mask area in pixels
+    maskArea?: number;
+
+    // Mask area to box area ratio
+    fillRatio?: number;
   }>;
+
+  // Transparent PNG mask overlay data URL (data:image/png;base64,...)
+  maskOverlayUrl?: string;
+
+  // Diagnostic flags
+  segmentationAvailable?: boolean;
+  segmentationFailureReason?: string;
 
   // Change detection
   changeSummary?: {

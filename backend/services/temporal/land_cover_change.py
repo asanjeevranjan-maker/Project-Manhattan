@@ -150,3 +150,4 @@ def calculate_land_cover_deltas(
         "significant_changes": significant_statements,
         "primary_shift": primary_shift,
     }
+

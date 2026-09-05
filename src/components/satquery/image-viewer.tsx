@@ -26,6 +26,7 @@ export function ImageViewer() {
   const reset = useSatQueryStore((s) => s.reset);
   const [loadedImageId, setLoadedImageId] = useState<string | null>(null);
   const [errorImageId, setErrorImageId] = useState<string | null>(null);
+  const [overlayMode, setOverlayMode] = useState<'both' | 'masks' | 'boxes'>('both');
   const imgRef = useRef<HTMLImageElement>(null);
 
   const imgLoaded = !!activeImage && loadedImageId === activeImage.id;
@@ -49,6 +50,8 @@ export function ImageViewer() {
 
   const regions = analysis?.regions ?? [];
   const hasRegions = regions.length > 0;
+  const hasMasks = Boolean(analysis?.maskOverlayUrl);
+  const showAnyOverlay = hasRegions || hasMasks;
 
   return (
     <div className="flex h-full min-h-[400px] flex-col gap-3">
@@ -64,23 +67,69 @@ export function ImageViewer() {
         </div>
         <div className="flex items-center gap-2">
           <ImageUploader variant="compact" />
-          {hasRegions && (
-            <Button
-              size="sm"
-              variant={showOverlay ? 'secondary' : 'outline'}
-              onClick={() => setShowOverlay(!showOverlay)}
-              className="gap-1.5"
-            >
-              {showOverlay ? (
-                <>
-                  <EyeOff className="size-3.5" /> Hide overlay
-                </>
-              ) : (
-                <>
-                  <Eye className="size-3.5" /> Show overlay
-                </>
+          {showAnyOverlay && (
+            <div className="flex items-center gap-1.5">
+              <Button
+                size="sm"
+                variant={showOverlay ? 'secondary' : 'outline'}
+                onClick={() => setShowOverlay(!showOverlay)}
+                className="gap-1.5"
+              >
+                {showOverlay ? (
+                  <>
+                    <EyeOff className="size-3.5" /> Hide overlay
+                  </>
+                ) : (
+                  <>
+                    <Eye className="size-3.5" /> Show overlay
+                  </>
+                )}
+              </Button>
+
+              {showOverlay && (hasMasks || hasRegions) && (
+                <div className="flex items-center rounded-md border bg-muted/40 p-0.5 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setOverlayMode('both')}
+                    className={cn(
+                      'rounded px-2 py-0.5 font-medium transition-colors',
+                      overlayMode === 'both'
+                        ? 'bg-background text-foreground shadow-xs'
+                        : 'text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    Both
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOverlayMode('masks')}
+                    disabled={!hasMasks}
+                    className={cn(
+                      'rounded px-2 py-0.5 font-medium transition-colors',
+                      overlayMode === 'masks'
+                        ? 'bg-background text-foreground shadow-xs'
+                        : 'text-muted-foreground hover:text-foreground',
+                      !hasMasks && 'opacity-40 cursor-not-allowed'
+                    )}
+                    title={hasMasks ? 'Show only segmentation masks' : 'No segmentation masks available'}
+                  >
+                    Masks
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOverlayMode('boxes')}
+                    className={cn(
+                      'rounded px-2 py-0.5 font-medium transition-colors',
+                      overlayMode === 'boxes'
+                        ? 'bg-background text-foreground shadow-xs'
+                        : 'text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    Boxes
+                  </button>
+                </div>
               )}
-            </Button>
+            </div>
           )}
           <Button size="sm" variant="ghost" onClick={reset} className="gap-1.5">
             <X className="size-3.5" /> Clear
@@ -122,8 +171,17 @@ export function ImageViewer() {
               )}
             />
 
-            {/* Overlay layer — same bounding box as the image */}
-            {imgLoaded && showOverlay && hasRegions && (
+            {/* Mask overlay layer — identical object-contain aspect-ratio alignment */}
+            {imgLoaded && showOverlay && hasMasks && (overlayMode === 'both' || overlayMode === 'masks') && (
+              <img
+                src={analysis?.maskOverlayUrl ?? undefined}
+                alt="Segmentation masks overlay"
+                className="pointer-events-none absolute inset-0 h-full w-full object-contain select-none transition-opacity duration-200"
+              />
+            )}
+
+            {/* Bounding box layer — same coordinate space */}
+            {imgLoaded && showOverlay && hasRegions && (overlayMode === 'both' || overlayMode === 'boxes') && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                 <div className="relative h-full w-full">
                   {regions.map((region, idx) => (
@@ -187,6 +245,11 @@ function RegionBox({
         >
           <span>{region.label}</span>
           <span className="opacity-80">{Math.round(region.confidence * 100)}%</span>
+          {region.fillRatio !== undefined && (
+            <span className="opacity-75 font-normal">
+              ({Math.round(region.fillRatio * 100)}% fill)
+            </span>
+          )}
         </div>
       )}
     </div>
@@ -197,9 +260,23 @@ function CoverageLegend({ analysis }: { analysis: AnalysisResult }) {
   return (
     <div className="rounded-lg border bg-card/60 p-3">
       <div className="mb-2 flex items-center justify-between">
-        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Land Cover Coverage
-        </p>
+        <div className="flex items-center gap-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Land Cover Coverage
+          </p>
+          {analysis.segmentationAvailable ? (
+            <span className="inline-flex items-center rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+              SAM2 Active
+            </span>
+          ) : analysis.segmentationFailureReason ? (
+            <span
+              className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+              title={analysis.segmentationFailureReason}
+            >
+              SAM2 Fallback
+            </span>
+          ) : null}
+        </div>
         <span className="text-xs text-muted-foreground">
           Overall confidence: <span className="font-semibold text-foreground">{Math.round(analysis.confidence * 100)}%</span>
         </span>

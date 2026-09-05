@@ -214,3 +214,4 @@ class BiTemporalMultimodalAnalyzer:
 
 
 bitemporal_analyzer = BiTemporalMultimodalAnalyzer()
+

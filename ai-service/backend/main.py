@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image, UnidentifiedImageError
@@ -231,6 +231,7 @@ async def detect(
             "deduplication": dedup_stats,
             "segmentation_available": seg_avail,
             "segmentation": seg_meta,
+            "mask_overlay_url": seg_meta.get("mask_overlay_url") or seg_meta.get("overlay_preview"),
             "land_cover": land_cover,
             "verification_available": verification_avail,
             "verification": verification_meta,
@@ -242,6 +243,74 @@ async def detect(
         print("\n[FASTAPI DETECTION ERROR]")
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": "Detection service failed.", "details": str(error)})
+
+
+# =========================================================
+# ISOLATED DEBUG SEGMENTATION ENDPOINT (PHASE 11)
+# =========================================================
+
+@app.post("/detect/debug-segmentation")
+@app.post("/api/detection/debug-segmentation")
+async def debug_segmentation(
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    box: Optional[str] = Form(None),
+    label: Optional[str] = Form(None),
+):
+    """
+    Dedicated endpoint for isolated SAM testing (Phase 11).
+    Accepts either multipart form (file, box, label) or JSON body (image, box/bbox, label).
+    Returns crop preview, mask overlay PNG data URL, fill ratio, and diagnostic logs.
+    """
+    try:
+        content_type = request.headers.get("content-type", "").lower()
+        image = None
+        box_coords = None
+        target_label = "ship"
+
+        if "application/json" in content_type:
+            data = await request.json()
+            raw_img = data.get("image") or data.get("image_data") or data.get("imageDataUrl")
+            if not raw_img:
+                return JSONResponse(status_code=400, content={"error": "Missing 'image' in request JSON."})
+            image_bytes = base64.b64decode(raw_img.split(",", 1)[-1] if "," in raw_img else raw_img)
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            box_in = data.get("box") or data.get("bbox")
+            if isinstance(box_in, list):
+                box_coords = [float(v) for v in box_in]
+            elif isinstance(box_in, str):
+                clean_str = box_in.strip()
+                box_coords = [float(v) for v in json.loads(clean_str)] if clean_str.startswith("[") else [float(v.strip()) for v in clean_str.split(",")]
+            target_label = data.get("label") or "ship"
+        else:
+            if file is not None:
+                image_bytes = await file.read()
+                if not image_bytes:
+                    return JSONResponse(status_code=400, content={"error": "Uploaded image file is empty."})
+                image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            if box:
+                clean_box_str = box.strip()
+                box_coords = [float(v) for v in json.loads(clean_box_str)] if clean_box_str.startswith("[") else [float(v.strip()) for v in clean_box_str.split(",")]
+            if label:
+                target_label = label
+
+        if image is None:
+            return JSONResponse(status_code=400, content={"error": "Image file or JSON payload is required."})
+        if not box_coords or len(box_coords) != 4:
+            return JSONResponse(status_code=400, content={"error": "Bounding box [x1, y1, x2, y2] is required."})
+
+        from dino_vocabulary import debug_segment_single_box
+        debug_res = debug_segment_single_box(
+            image=image,
+            box_xyxy=box_coords,
+            label=str(target_label).strip(),
+        )
+        return JSONResponse(status_code=200, content=debug_res)
+
+    except Exception as error:
+        print("\n[FASTAPI DEBUG SEGMENTATION ERROR]")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": "Debug segmentation failed.", "details": str(error)})
 
 
 # =========================================================
