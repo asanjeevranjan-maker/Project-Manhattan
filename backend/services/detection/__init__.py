@@ -68,6 +68,19 @@ from .land_cover import (
     map_label_to_category,
 )
 
+from .verifier import (
+    VERIFIER_AVAILABLE,
+    ENABLE_VERIFICATION,
+    VERIFICATION_THRESHOLD,
+    DEFAULT_VERIFICATION_CLASSES,
+    CLASS_NEGATIVE_ALTERNATIVES,
+    crop_detection_box,
+    get_alternatives_for_class,
+    verify_detection,
+    verify_detections,
+    get_verifier,
+)
+
 __all__ = [
     "SATELLITE_CLASSES",
     "ANALYSIS_PRESETS",
@@ -118,5 +131,16 @@ __all__ = [
     "LABEL_TO_CATEGORY",
     "LAND_COVER_COLORS",
     "map_label_to_category",
+    "VERIFIER_AVAILABLE",
+    "ENABLE_VERIFICATION",
+    "VERIFICATION_THRESHOLD",
+    "DEFAULT_VERIFICATION_CLASSES",
+    "CLASS_NEGATIVE_ALTERNATIVES",
+    "crop_detection_box",
+    "get_alternatives_for_class",
+    "verify_detection",
+    "verify_detections",
+    "get_verifier",
 ]
+
 

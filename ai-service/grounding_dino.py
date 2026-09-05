@@ -55,6 +55,10 @@ from dino_vocabulary import (
     ENABLE_SEGMENTATION,
     segment_detections,
     calculate_land_cover,
+    VERIFIER_AVAILABLE,
+    ENABLE_VERIFICATION,
+    VERIFICATION_THRESHOLD,
+    verify_detections,
 )
 
 logger = logging.getLogger("satquery.grounding_dino")
@@ -238,6 +242,8 @@ def detect_objects(
     iou_threshold: Optional[float] = None,
     merge_mode: str = "standard",
     enable_segmentation: Optional[bool] = None,
+    enable_verification: Optional[bool] = None,
+    verification_threshold: Optional[float] = None,
     return_tiling_metadata: bool = False,
 ):
     """
@@ -339,8 +345,17 @@ def detect_objects(
     )
 
     logger.info(
-        f"[Grounding DINO] Final verified detections after NMS: {len(final_detections)} "
+        f"[Grounding DINO] Detections after NMS: {len(final_detections)} "
         f"(raw: {dedup_stats['raw_detection_count']}, duplicates removed: {dedup_stats['duplicates_removed']})"
+    )
+
+    # 3.5 Secondary Detection Verification using SigLIP (reduces false positives)
+    run_verification = ENABLE_VERIFICATION if enable_verification is None else bool(enable_verification)
+    final_detections, verification_metadata = verify_detections(
+        image=image,
+        detections=final_detections,
+        enable_verification=run_verification,
+        threshold=verification_threshold,
     )
 
     # 4. Optional SAM2-based segmentation on verified detections
@@ -380,6 +395,7 @@ def detect_objects(
         overlap=overlap,
     )
     tiling_metadata["deduplication"] = dedup_stats
+    tiling_metadata["verification"] = verification_metadata
     tiling_metadata["segmentation"] = seg_metadata
     tiling_metadata["land_cover"] = land_cover_result
 

@@ -73,6 +73,18 @@ try:
         LAND_COVER_COLORS,
         map_label_to_category,
     )
+    from services.detection.verifier import (
+        VERIFIER_AVAILABLE,
+        ENABLE_VERIFICATION,
+        VERIFICATION_THRESHOLD,
+        DEFAULT_VERIFICATION_CLASSES,
+        CLASS_NEGATIVE_ALTERNATIVES,
+        crop_detection_box,
+        get_alternatives_for_class,
+        verify_detection,
+        verify_detections,
+        get_verifier,
+    )
     from services.vision.context_builder import build_vision_context
 except ImportError:
     # Direct relative import fallback
@@ -81,6 +93,7 @@ except ImportError:
     from services.detection.nms import *  # type: ignore
     from services.detection.segmentation import *  # type: ignore
     from services.detection.land_cover import *  # type: ignore
+    from services.detection.verifier import *  # type: ignore
     from services.vision.context_builder import *  # type: ignore
 
 __all__ = [
@@ -135,5 +148,16 @@ __all__ = [
     "LAND_COVER_COLORS",
     "map_label_to_category",
     "build_vision_context",
+    "VERIFIER_AVAILABLE",
+    "ENABLE_VERIFICATION",
+    "VERIFICATION_THRESHOLD",
+    "DEFAULT_VERIFICATION_CLASSES",
+    "CLASS_NEGATIVE_ALTERNATIVES",
+    "crop_detection_box",
+    "get_alternatives_for_class",
+    "verify_detection",
+    "verify_detections",
+    "get_verifier",
 ]
+
 

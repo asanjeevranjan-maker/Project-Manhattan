@@ -167,6 +167,8 @@ async def detect(
     iou_threshold: Optional[float] = Form(None),
     merge_mode: Optional[str] = Form("standard"),
     enable_segmentation: Optional[bool] = Form(True),
+    enable_verification: Optional[bool] = Form(None),
+    verification_threshold: Optional[float] = Form(None),
 ):
     try:
         if file is None:
@@ -186,7 +188,7 @@ async def detect(
         except Exception as image_error:
             return JSONResponse(status_code=400, content={"error": "Unable to read the uploaded image.", "details": str(image_error)})
 
-        print(f"\n[SINGLE-IMAGE] Filename: {file.filename} | Prompt: {prompt} | Preset: {preset} | use_tiles: {use_tiles} | merge_mode: {merge_mode} | seg: {enable_segmentation}")
+        print(f"\n[SINGLE-IMAGE] Filename: {file.filename} | Prompt: {prompt} | Preset: {preset} | use_tiles: {use_tiles} | merge_mode: {merge_mode} | seg: {enable_segmentation} | verif: {enable_verification}")
         detections, tiling_meta = detect_objects(
             image=image,
             prompt=prompt.strip(),
@@ -195,6 +197,8 @@ async def detect(
             iou_threshold=iou_threshold,
             merge_mode=merge_mode or "standard",
             enable_segmentation=enable_segmentation,
+            enable_verification=enable_verification,
+            verification_threshold=verification_threshold,
             return_tiling_metadata=True,
         )
 
@@ -205,6 +209,8 @@ async def detect(
         seg_meta = tiling_meta.get("segmentation") if isinstance(tiling_meta, dict) else {}
         seg_avail = seg_meta.get("segmentation_available", False) if isinstance(seg_meta, dict) else False
         land_cover = tiling_meta.get("land_cover") if isinstance(tiling_meta, dict) else None
+        verification_meta = tiling_meta.get("verification") if isinstance(tiling_meta, dict) else {}
+        verification_avail = verification_meta.get("verification_available", False) if isinstance(verification_meta, dict) else False
 
         result = {
             "count": len(detections),
@@ -218,6 +224,8 @@ async def detect(
             "segmentation_available": seg_avail,
             "segmentation": seg_meta,
             "land_cover": land_cover,
+            "verification_available": verification_avail,
+            "verification": verification_meta,
         }
 
         return JSONResponse(status_code=200, content=result)
