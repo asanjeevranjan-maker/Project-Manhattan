@@ -334,3 +334,4 @@ def apply_class_nms(
         return final_detections, stats
 
     return final_detections
+

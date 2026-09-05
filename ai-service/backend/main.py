@@ -166,6 +166,7 @@ async def detect(
     use_tiles: Optional[bool] = Form(None),
     iou_threshold: Optional[float] = Form(None),
     merge_mode: Optional[str] = Form("standard"),
+    enable_segmentation: Optional[bool] = Form(True),
 ):
     try:
         if file is None:
@@ -185,7 +186,7 @@ async def detect(
         except Exception as image_error:
             return JSONResponse(status_code=400, content={"error": "Unable to read the uploaded image.", "details": str(image_error)})
 
-        print(f"\n[SINGLE-IMAGE] Filename: {file.filename} | Prompt: {prompt} | Preset: {preset} | use_tiles: {use_tiles} | merge_mode: {merge_mode}")
+        print(f"\n[SINGLE-IMAGE] Filename: {file.filename} | Prompt: {prompt} | Preset: {preset} | use_tiles: {use_tiles} | merge_mode: {merge_mode} | seg: {enable_segmentation}")
         detections, tiling_meta = detect_objects(
             image=image,
             prompt=prompt.strip(),
@@ -193,6 +194,7 @@ async def detect(
             use_tiles=use_tiles,
             iou_threshold=iou_threshold,
             merge_mode=merge_mode or "standard",
+            enable_segmentation=enable_segmentation,
             return_tiling_metadata=True,
         )
 
@@ -200,6 +202,8 @@ async def detect(
             detections = []
 
         dedup_stats = tiling_meta.get("deduplication") if isinstance(tiling_meta, dict) else None
+        seg_meta = tiling_meta.get("segmentation") if isinstance(tiling_meta, dict) else {}
+        seg_avail = seg_meta.get("segmentation_available", False) if isinstance(seg_meta, dict) else False
 
         result = {
             "count": len(detections),
@@ -210,6 +214,8 @@ async def detect(
             "detections": detections,
             "tiling": tiling_meta,
             "deduplication": dedup_stats,
+            "segmentation_available": seg_avail,
+            "segmentation": seg_meta,
         }
 
         return JSONResponse(status_code=200, content=result)

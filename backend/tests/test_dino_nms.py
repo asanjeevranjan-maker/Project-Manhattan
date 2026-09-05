@@ -250,3 +250,4 @@ def test_direct_non_tiled_detection_integration():
     assert stats["duplicates_removed"] == 1
     assert final[0]["id"] == "det-1"
     assert final[1]["id"] == "det-2"
+

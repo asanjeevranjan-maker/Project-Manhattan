@@ -51,6 +51,9 @@ from dino_vocabulary import (
     calculate_iou,
     apply_class_nms,
     get_deduplication_stats,
+    SAM2_AVAILABLE,
+    ENABLE_SEGMENTATION,
+    segment_detections,
 )
 
 logger = logging.getLogger("satquery.grounding_dino")
@@ -233,6 +236,7 @@ def detect_objects(
     max_tiles: int = MAX_TILES,
     iou_threshold: Optional[float] = None,
     merge_mode: str = "standard",
+    enable_segmentation: Optional[bool] = None,
     return_tiling_metadata: bool = False,
 ):
     """
@@ -338,6 +342,24 @@ def detect_objects(
         f"(raw: {dedup_stats['raw_detection_count']}, duplicates removed: {dedup_stats['duplicates_removed']})"
     )
 
+    # 4. Optional SAM2-based segmentation on verified detections
+    run_segmentation = ENABLE_SEGMENTATION if enable_segmentation is None else bool(enable_segmentation)
+    if run_segmentation and final_detections:
+        final_detections, seg_metadata = segment_detections(
+            image=image,
+            detections=final_detections,
+            enable_segmentation=True,
+        )
+    else:
+        seg_metadata = {
+            "segmentation_available": SAM2_AVAILABLE,
+            "enabled": run_segmentation,
+            "segmented_count": 0,
+            "total_detections": len(final_detections),
+            "backend": None,
+            "overlay_preview": None,
+        }
+
     tiling_metadata = format_tile_metadata(
         tiles_info=tiles_debug_info,
         enabled=will_tile,
@@ -347,6 +369,7 @@ def detect_objects(
         overlap=overlap,
     )
     tiling_metadata["deduplication"] = dedup_stats
+    tiling_metadata["segmentation"] = seg_metadata
 
     if return_tiling_metadata:
         return final_detections, tiling_metadata

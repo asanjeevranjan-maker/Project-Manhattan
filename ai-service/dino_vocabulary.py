@@ -50,11 +50,27 @@ try:
         apply_class_nms,
         get_deduplication_stats,
     )
+    from services.detection.segmentation import (
+        SAM2_AVAILABLE,
+        SAM2_BACKEND,
+        ENABLE_SEGMENTATION,
+        DEFAULT_SEGMENTABLE_CLASSES,
+        CLASS_OVERLAY_COLORS,
+        is_class_segmentable,
+        mask_to_rle,
+        mask_to_polygon,
+        compute_mask_bounds,
+        compute_mask_area,
+        generate_overlay_preview,
+        segment_detections,
+        get_sam2_predictor,
+    )
 except ImportError:
     # Direct relative import fallback
     from services.detection.vocabulary import *  # type: ignore
     from services.detection.tiler import *  # type: ignore
     from services.detection.nms import *  # type: ignore
+    from services.detection.segmentation import *  # type: ignore
 
 __all__ = [
     "SATELLITE_CLASSES",
@@ -88,5 +104,18 @@ __all__ = [
     "calculate_iou",
     "apply_class_nms",
     "get_deduplication_stats",
+    "SAM2_AVAILABLE",
+    "SAM2_BACKEND",
+    "ENABLE_SEGMENTATION",
+    "DEFAULT_SEGMENTABLE_CLASSES",
+    "CLASS_OVERLAY_COLORS",
+    "is_class_segmentable",
+    "mask_to_rle",
+    "mask_to_polygon",
+    "compute_mask_bounds",
+    "compute_mask_area",
+    "generate_overlay_preview",
+    "segment_detections",
+    "get_sam2_predictor",
 ]
 
