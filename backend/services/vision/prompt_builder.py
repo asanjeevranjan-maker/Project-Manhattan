@@ -26,7 +26,12 @@ PRIMARY GROUNDING RULES:
    - calculated statistics (counts, percentages, and spatial metrics)
    - model interpretation (analytical context and domain assessment)
 4. Treat the image as remote-sensing / Earth observation imagery, not a ground-level photograph.
-5. If change-detection results are provided, explain visible differences without inventing ungrounded real-world causes.
+5. For bi-temporal change analysis:
+   - Strictly quote machine-calculated land-cover percentage point deltas (e.g. '+5.2 percentage points') and object change counts. NEVER invent contradictory numbers or percentages.
+   - You MUST explicitly distinguish:
+     a. OBSERVED CHANGE: Factual physical differences confirmed by detection, masks, or radar backscatter (e.g. 'Water coverage increased by 5.2 percentage points, concentrated primarily in the lower-right quadrant').
+     b. POSSIBLE CAUSE: Plausible analytical hypotheses or potential drivers (e.g. 'Likely caused by seasonal river surge or heavy precipitation runoff; ground hydrological data required for confirmation').
+   - When SAR radar backscatter shifts are present, reference them as cloud-penetrating structural/inundation evidence.
 6. Never claim exact geographic coordinates, object identity, building ownership, event cause, historical date, physical distance, area, or scale unless explicitly provided in metadata.
 7. If image resolution is insufficient to identify small objects, explicitly report that limitation.
 8. Use standard spatial localization terms (left side, right side, center-left, center-right, upper-left, upper-right, center, lower-left, lower-right, widespread).
@@ -45,10 +50,12 @@ ANALYSIS_MODE_GUIDELINES: Dict[str, str] = {
 - Describe spatial clustering, approximate density, and spatial distribution across image quadrants.
 - Categorize confidence based on clarity of geometric shapes, roof outlines, and contrast against background.""",
 
-    "changes": """ANALYSIS MODE: BI-TEMPORAL CHANGE DETECTION
-- Focus primarily on differences between Image 1 (BEFORE) and Image 2 (AFTER).
-- Highlight additions of structures, removals/clearance, vegetation loss or regrowth, water boundary expansion/recession, and ground disruption.
-- State WHAT visibly changed and WHERE; do NOT invent causes (e.g. economic growth, natural disasters) unless documented.""",
+    "changes": """ANALYSIS MODE: BI-TEMPORAL MULTIMODAL CHANGE DETECTION
+- Focus primarily on differences between Image 1 (BEFORE/T1) and Image 2 (AFTER/T2).
+- Quote supplied machine deltas for land-cover transitions (water expansion/reduction, urban growth, vegetation loss).
+- Report object dynamics (appeared, disappeared, modified, persisted) with spatial quadrants.
+- Cite SAR radar scattering changes where optical imagery is cloudy or ambiguous.
+- MANDATORY: Distinguish OBSERVED CHANGE (what the imagery shows) from POSSIBLE CAUSE (hypothesized explanation).""",
 
     "urban": """ANALYSIS MODE: URBAN & SETTLEMENT PATTERNS
 - Analyze building density, roof outlines, and spatial layout (organic vs planned grid).
@@ -101,6 +108,12 @@ You must return a valid JSON object matching this exact schema:
     "object_counts": {},
     "land_cover_percentages": {}
   },
+  "observed_changes": [
+    "Confirmed physical changes between T1 and T2 quoting exact percentages or counts"
+  ],
+  "possible_causes": [
+    "Plausible hypotheses explaining the observed changes (clearly distinguished from observed facts)"
+  ],
   "observations": [
     {
       "finding": "Concise title of observed feature or pattern",

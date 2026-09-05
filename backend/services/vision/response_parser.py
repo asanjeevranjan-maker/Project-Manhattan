@@ -29,6 +29,8 @@ class SatelliteAnalysisStructured(BaseModel):
     answer_to_query: str = Field(default="", description="Direct, evidence-grounded answer to user query (mirror of answer)")
     evidence: EvidenceMetadata = Field(default_factory=EvidenceMetadata, description="Evidence usage flags")
     calculated_statistics: Dict[str, Any] = Field(default_factory=dict, description="Objective metrics, counts, and percentages")
+    observed_changes: List[str] = Field(default_factory=list, description="Confirmed physical differences between timestamps")
+    possible_causes: List[str] = Field(default_factory=list, description="Plausible hypotheses explaining observed changes")
     observations: List[ObservationItem] = Field(default_factory=list, description="Structured visual findings")
     uncertainties: List[str] = Field(default_factory=list, description="Caveats or resolution/sensor limitations")
     model_notes: Dict[str, Any] = Field(default_factory=dict, description="Metadata about context used")
@@ -115,6 +117,12 @@ def parse_structured_response(
                             )
                         )
 
+            raw_changes = data.get("observed_changes", [])
+            observed_changes = [str(c) for c in raw_changes if c] if isinstance(raw_changes, list) else []
+
+            raw_causes = data.get("possible_causes", [])
+            possible_causes = [str(c) for c in raw_causes if c] if isinstance(raw_causes, list) else []
+
             raw_unc = data.get("uncertainties", [])
             uncertainties = [str(u) for u in raw_unc if u] if isinstance(raw_unc, list) else []
 
@@ -128,6 +136,8 @@ def parse_structured_response(
                 answer_to_query=answer or "Visual inspection completed based on visible evidence.",
                 evidence=evidence,
                 calculated_statistics=calculated_statistics,
+                observed_changes=observed_changes,
+                possible_causes=possible_causes,
                 observations=observations,
                 uncertainties=uncertainties,
                 model_notes=model_notes,
@@ -240,6 +250,8 @@ def to_legacy_analysis_result(
         "regions": regions,
         "evidence": structured.evidence.model_dump(),
         "calculated_statistics": structured.calculated_statistics,
+        "observed_changes": structured.observed_changes,
+        "possible_causes": structured.possible_causes,
         "changeSummary": {
             "additions": [obs.finding for obs in structured.observations if "new" in obs.finding.lower()],
             "removals": [obs.finding for obs in structured.observations if "remov" in obs.finding.lower() or "absent" in obs.finding.lower()],

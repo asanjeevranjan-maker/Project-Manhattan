@@ -244,22 +244,61 @@ def build_vision_context(
             segmentation_used = True
 
     # 5. Extract Change Detection Summary
-    change_summary_text: Optional[str] = None
+    change_summary_lines: List[str] = []
     change_detection_used = False
+
     if isinstance(change_detection, dict):
+        change_detection_used = True
+
+        # Check for multi-modal bi-temporal result
+        lc_deltas = change_detection.get("land_cover_change")
+        if isinstance(lc_deltas, dict):
+            change_summary_lines.append("Land-cover changes (T1 to T2):")
+            for cat, delta in lc_deltas.items():
+                if delta != 0.0:
+                    sign = f"+{delta}" if delta > 0 else f"{delta}"
+                    change_summary_lines.append(f"- {cat}: {sign} percentage points")
+
+        objs_summary = change_detection.get("objects_summary") or change_detection.get("summary")
+        if isinstance(objs_summary, dict):
+            app_cnt = objs_summary.get("appeared_count", objs_summary.get("newCount", 0))
+            dis_cnt = objs_summary.get("disappeared_count", objs_summary.get("removedCount", 0))
+            per_cnt = objs_summary.get("persisted_count", objs_summary.get("unchangedCount", 0))
+            chg_cnt = objs_summary.get("possibly_changed_count", objs_summary.get("modifiedCount", 0))
+            change_summary_lines.append(
+                f"Object dynamics: {app_cnt} appeared, {dis_cnt} disappeared, {chg_cnt} modified, {per_cnt} persisted."
+            )
+
+        # Detailed object changes by location
+        objs_dict = change_detection.get("objects")
+        if isinstance(objs_dict, dict):
+            app_list = objs_dict.get("appeared", [])
+            if app_list:
+                loc_summary = ", ".join(f"{item.get('label')} in {item.get('location', 'scene')}" for item in app_list[:4])
+                change_summary_lines.append(f"- Newly appeared objects: {loc_summary}")
+            dis_list = objs_dict.get("disappeared", [])
+            if dis_list:
+                loc_summary = ", ".join(f"{item.get('label')} in {item.get('location', 'scene')}" for item in dis_list[:4])
+                change_summary_lines.append(f"- Disappeared objects: {loc_summary}")
+
+        # SAR radar scattering analysis
+        sar_analysis = change_detection.get("sar_analysis")
+        if isinstance(sar_analysis, dict) and sar_analysis.get("available"):
+            radar_sum = sar_analysis.get("radar_summary")
+            if radar_sum:
+                change_summary_lines.append(f"SAR radar backscatter evidence: {radar_sum}")
+
+        # Primary shift
+        primary_shift = change_detection.get("primary_shift")
+        if primary_shift:
+            change_summary_lines.append(f"Primary shift: {primary_shift}")
+
+        # Fallback to simple pixel change percentage if present
         change_pct = change_detection.get("changePercentage") or change_detection.get("change_percentage")
-        summary_dict = change_detection.get("summary")
-        parts = []
-        if change_pct is not None:
-            parts.append(f"{change_pct}% radiometric change")
-        if isinstance(summary_dict, dict):
-            nc = summary_dict.get("newCount", summary_dict.get("new_count", 0))
-            rc = summary_dict.get("removedCount", summary_dict.get("removed_count", 0))
-            mc = summary_dict.get("modifiedCount", summary_dict.get("modified_count", 0))
-            parts.append(f"{nc} new, {rc} removed, {mc} altered")
-        if parts:
-            change_summary_text = f"Bi-temporal change detection: {', '.join(parts)}."
-            change_detection_used = True
+        if change_pct is not None and not lc_deltas:
+            change_summary_lines.append(f"Radiometric change: {change_pct}% of surface area altered.")
+
+    change_summary_text = "\n".join(change_summary_lines) if change_summary_lines else None
 
     # 6. Compose Structured Prompt Text
     prompt_lines: List[str] = []

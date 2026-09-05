@@ -28,6 +28,14 @@ from temporal_matcher import match_temporal_detections
 from pixel_change import compute_pixel_change
 
 try:
+    from services.temporal import bitemporal_analyzer
+    TEMPORAL_ANALYZER_AVAILABLE = True
+except Exception as _te:
+    print(f"[Warning] Failed to import temporal analyzer in ai-service: {_te}")
+    bitemporal_analyzer = None
+    TEMPORAL_ANALYZER_AVAILABLE = False
+
+try:
     from services.vision.vision_service import vision_service
     from services.vision.response_parser import to_legacy_analysis_result
     from services.vision.base_provider import (
@@ -598,6 +606,135 @@ async def temporal_manual(
             "error": "Manual temporal comparison failed.",
             "details": str(error)
         })
+
+
+# =========================================================
+# BI-TEMPORAL MULTIMODAL COMPARISON (OPTICAL + SAR)
+# =========================================================
+
+@app.post("/temporal/multimodal")
+async def temporal_multimodal(
+    file_t1_optical: Optional[UploadFile] = File(None),
+    file_t1_sar: Optional[UploadFile] = File(None),
+    file_t2_optical: Optional[UploadFile] = File(None),
+    file_t2_sar: Optional[UploadFile] = File(None),
+    file_t1: Optional[UploadFile] = File(None),
+    file_t2: Optional[UploadFile] = File(None),
+    prompt: str = Form("building, water, vegetation, road"),
+    date_t1: Optional[str] = Form("Time 1"),
+    date_t2: Optional[str] = Form("Time 2"),
+    user_query: Optional[str] = Form("Analyze all land-cover and structural changes between Time 1 and Time 2."),
+    provider: Optional[str] = Form("auto"),
+    enable_vlm_interpretation: bool = Form(True),
+):
+    try:
+        # Resolve files with generic fallback
+        f_t1_opt = file_t1_optical or file_t1
+        f_t2_opt = file_t2_optical or file_t2
+        f_t1_sar = file_t1_sar
+        f_t2_sar = file_t2_sar
+
+        if (f_t1_opt is None and f_t1_sar is None) or (f_t2_opt is None and f_t2_sar is None):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "At least one image (optical or SAR) for Time 1 and Time 2 must be provided."}
+            )
+
+        async def _read_img(f: Optional[UploadFile]) -> Optional[Image.Image]:
+            if f is None:
+                return None
+            b = await f.read()
+            if not b:
+                return None
+            return Image.open(io.BytesIO(b))
+
+        opt1 = await _read_img(f_t1_opt)
+        opt2 = await _read_img(f_t2_opt)
+        sar1 = await _read_img(f_t1_sar)
+        sar2 = await _read_img(f_t2_sar)
+
+        # 1. Independent Grounding DINO detection on available optical/fused representations
+        clean_prompt = prompt.strip() if prompt else "building, water, vegetation, road"
+
+        dets_t1, meta_t1 = [], {}
+        t1_input = opt1 or sar1
+        if t1_input:
+            dets_t1, meta_t1 = detect_objects(
+                image=t1_input,
+                prompt=clean_prompt,
+                enable_segmentation=True,
+                return_tiling_metadata=True,
+            )
+
+        dets_t2, meta_t2 = [], {}
+        t2_input = opt2 or sar2
+        if t2_input:
+            dets_t2, meta_t2 = detect_objects(
+                image=t2_input,
+                prompt=clean_prompt,
+                enable_segmentation=True,
+                return_tiling_metadata=True,
+            )
+
+        # 2. Run Bi-Temporal Multimodal Analyzer
+        if bitemporal_analyzer is None:
+            return JSONResponse(status_code=503, content={"error": "BiTemporalMultimodalAnalyzer service unavailable."})
+
+        analysis = bitemporal_analyzer.analyze(
+            t1_optical=opt1,
+            t1_sar=sar1,
+            t2_optical=opt2,
+            t2_sar=sar2,
+            prompt=clean_prompt,
+            date_t1=date_t1 or "Time 1",
+            date_t2=date_t2 or "Time 2",
+            detections_t1=dets_t1,
+            detections_t2=dets_t2,
+            land_cover_t1=meta_t1.get("land_cover") if isinstance(meta_t1, dict) else None,
+            land_cover_t2=meta_t2.get("land_cover") if isinstance(meta_t2, dict) else None,
+        )
+
+        # 3. Optional Grounded Gemini/GLM Interpretation
+        interpretation_data = None
+        if enable_vlm_interpretation and VISION_SERVICE_AVAILABLE:
+            t2_img_for_vlm = opt2 or sar2
+            t1_img_for_vlm = opt1 or sar1
+            if t2_img_for_vlm:
+                try:
+                    vlm_res = await vision_service.analyze_image(
+                        image_data=_image_to_data_url(t2_img_for_vlm),
+                        user_query=user_query or "Assess changes between T1 and T2.",
+                        provider=provider or "auto",
+                        analysis_mode="changes",
+                        detection_context={"detections": dets_t2},
+                        change_context=analysis,
+                        second_image_data=_image_to_data_url(t1_img_for_vlm) if t1_img_for_vlm else None,
+                    )
+                    structured = vlm_res["structured_analysis"]
+                    interpretation_data = {
+                        "provider": vlm_res["provider_used"],
+                        "answer": structured.answer,
+                        "summary": structured.summary,
+                        "observed_changes": structured.observed_changes,
+                        "possible_causes": structured.possible_causes,
+                        "observations": [o.model_dump() for o in structured.observations],
+                        "uncertainties": structured.uncertainties,
+                    }
+                except Exception as _ve:
+                    print(f"[Warning] VLM interpretation failed during multimodal comparison: {_ve}")
+
+        analysis["interpretation"] = interpretation_data
+        return JSONResponse(status_code=200, content=analysis)
+
+    except Exception as error:
+        print("\n[FASTAPI MULTIMODAL TEMPORAL ERROR]")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={
+            "success": False,
+            "error": "Multimodal temporal comparison failed.",
+            "details": str(error)
+        })
+
 
 
 # =========================================================

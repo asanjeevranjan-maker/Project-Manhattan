@@ -21,6 +21,10 @@ from services.detection.vocabulary import (
     DEFAULT_CLASS_THRESHOLDS,
     sanitize_prompt,
 )
+from services.temporal import bitemporal_analyzer
+from services.vision.image_processor import decode_data_url
+from PIL import Image
+import io
 
 _load_env_if_missing()
 
@@ -65,6 +69,23 @@ class AnalyzeRequest(BaseModel):
     landCover: Optional[Dict[str, Any]] = Field(None, description="Alternative field for land cover")
     image_metadata: Optional[Dict[str, Any]] = Field(None, description="Optional image metadata (resolution, date, sensor)")
     history: Optional[List[Any]] = Field(default_factory=list, description="Optional conversational history")
+
+
+class BiTemporalMultimodalRequest(BaseModel):
+    t1_optical: Optional[str] = Field(None, description="Base64 data URL of T1 optical imagery")
+    t1_sar: Optional[str] = Field(None, description="Base64 data URL of T1 SAR radar imagery")
+    t2_optical: Optional[str] = Field(None, description="Base64 data URL of T2 optical imagery")
+    t2_sar: Optional[str] = Field(None, description="Base64 data URL of T2 SAR radar imagery")
+    prompt: Optional[str] = Field("building, water, vegetation, road", description="Objects of interest")
+    date_t1: Optional[str] = Field("Time 1", description="Date/epoch of T1")
+    date_t2: Optional[str] = Field("Time 2", description="Date/epoch of T2")
+    user_query: Optional[str] = Field("Analyze all land-cover and structural changes between Time 1 and Time 2.", description="User analytical query")
+    provider: Optional[str] = Field("auto", description="VLM provider")
+    detections_t1: Optional[List[Dict[str, Any]]] = Field(None, description="Pre-computed T1 detections")
+    detections_t2: Optional[List[Dict[str, Any]]] = Field(None, description="Pre-computed T2 detections")
+    land_cover_t1: Optional[Dict[str, Any]] = Field(None, description="T1 land cover")
+    land_cover_t2: Optional[Dict[str, Any]] = Field(None, description="T2 land cover")
+    enable_vlm_interpretation: Optional[bool] = Field(True, description="Whether to run Gemini/GLM interpretation")
 
 
 @app.get("/")
@@ -218,6 +239,86 @@ async def analyze_image_endpoint(req: AnalyzeRequest):
     except Exception as e:
         logger.error(f"[API Unexpected Error]: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Satellite analysis failed: {str(e)}")
+
+
+@app.post("/temporal/multimodal")
+@app.post("/api/temporal/multimodal")
+async def temporal_multimodal_endpoint(req: BiTemporalMultimodalRequest):
+    """
+    Bi-Temporal Multimodal Satellite Change Analysis Endpoint.
+    Ingests T1 & T2 Optical and/or SAR imagery, runs co-registration, single-epoch fusion,
+    detects changes across objects, calculates objective land-cover deltas,
+    analyzes differential SAR scattering, produces overlays, and delivers grounded VLM interpretation.
+    """
+    try:
+        def _parse_pil(data_url: Optional[str]) -> Optional[Image.Image]:
+            if not data_url:
+                return None
+            try:
+                b, _ = decode_data_url(data_url)
+                return Image.open(io.BytesIO(b))
+            except Exception:
+                return None
+
+        opt1 = _parse_pil(req.t1_optical)
+        sar1 = _parse_pil(req.t1_sar)
+        opt2 = _parse_pil(req.t2_optical)
+        sar2 = _parse_pil(req.t2_sar)
+
+        if (opt1 is None and sar1 is None) or (opt2 is None and sar2 is None):
+            raise HTTPException(
+                status_code=400,
+                detail="At least one image (optical or SAR) for Time 1 and Time 2 must be provided.",
+            )
+
+        analysis = bitemporal_analyzer.analyze(
+            t1_optical=opt1,
+            t1_sar=sar1,
+            t2_optical=opt2,
+            t2_sar=sar2,
+            prompt=req.prompt or "building, water, vegetation, road",
+            date_t1=req.date_t1 or "Time 1",
+            date_t2=req.date_t2 or "Time 2",
+            detections_t1=req.detections_t1,
+            detections_t2=req.detections_t2,
+            land_cover_t1=req.land_cover_t1,
+            land_cover_t2=req.land_cover_t2,
+        )
+
+        # Grounded VLM Interpretation if requested and imagery available
+        if req.enable_vlm_interpretation:
+            t2_for_vlm = req.t2_optical or req.t2_sar
+            t1_for_vlm = req.t1_optical or req.t1_sar
+            if t2_for_vlm:
+                try:
+                    vlm_res = await vision_service.analyze_image(
+                        image_data=t2_for_vlm,
+                        user_query=req.user_query or "Assess changes between T1 and T2.",
+                        provider=req.provider or "auto",
+                        analysis_mode="changes",
+                        detection_context={"detections": req.detections_t2 or []},
+                        change_context=analysis,
+                        second_image_data=t1_for_vlm,
+                    )
+                    structured = vlm_res["structured_analysis"]
+                    analysis["interpretation"] = {
+                        "provider": vlm_res["provider_used"],
+                        "answer": structured.answer,
+                        "summary": structured.summary,
+                        "observed_changes": structured.observed_changes,
+                        "possible_causes": structured.possible_causes,
+                        "observations": [o.model_dump() for o in structured.observations],
+                        "uncertainties": structured.uncertainties,
+                    }
+                except Exception as ve:
+                    logger.warning(f"[VLM Interpretation Warning]: {ve}")
+
+        return JSONResponse(status_code=200, content=analysis)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Temporal Multimodal Error]: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Bi-temporal analysis failed: {str(e)}")
 
 
 if __name__ == "__main__":
