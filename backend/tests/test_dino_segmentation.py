@@ -289,3 +289,4 @@ def test_empty_detections_segmentation():
     assert meta["segmented_count"] == 0
     assert meta["total_detections"] == 0
     assert meta["overlay_preview"] is None
+

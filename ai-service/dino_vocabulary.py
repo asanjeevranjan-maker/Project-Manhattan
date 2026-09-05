@@ -65,12 +65,21 @@ try:
         segment_detections,
         get_sam2_predictor,
     )
+    from services.detection.land_cover import (
+        LandCoverAnalyzer,
+        calculate_land_cover,
+        DEFAULT_CATEGORY_PRIORITY,
+        LABEL_TO_CATEGORY,
+        LAND_COVER_COLORS,
+        map_label_to_category,
+    )
 except ImportError:
     # Direct relative import fallback
     from services.detection.vocabulary import *  # type: ignore
     from services.detection.tiler import *  # type: ignore
     from services.detection.nms import *  # type: ignore
     from services.detection.segmentation import *  # type: ignore
+    from services.detection.land_cover import *  # type: ignore
 
 __all__ = [
     "SATELLITE_CLASSES",
@@ -117,5 +126,11 @@ __all__ = [
     "generate_overlay_preview",
     "segment_detections",
     "get_sam2_predictor",
+    "LandCoverAnalyzer",
+    "calculate_land_cover",
+    "DEFAULT_CATEGORY_PRIORITY",
+    "LABEL_TO_CATEGORY",
+    "LAND_COVER_COLORS",
+    "map_label_to_category",
 ]
 

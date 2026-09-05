@@ -204,6 +204,7 @@ async def detect(
         dedup_stats = tiling_meta.get("deduplication") if isinstance(tiling_meta, dict) else None
         seg_meta = tiling_meta.get("segmentation") if isinstance(tiling_meta, dict) else {}
         seg_avail = seg_meta.get("segmentation_available", False) if isinstance(seg_meta, dict) else False
+        land_cover = tiling_meta.get("land_cover") if isinstance(tiling_meta, dict) else None
 
         result = {
             "count": len(detections),
@@ -216,6 +217,7 @@ async def detect(
             "deduplication": dedup_stats,
             "segmentation_available": seg_avail,
             "segmentation": seg_meta,
+            "land_cover": land_cover,
         }
 
         return JSONResponse(status_code=200, content=result)

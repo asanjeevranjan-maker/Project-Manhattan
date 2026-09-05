@@ -129,6 +129,7 @@ def parse_structured_response(
 def to_legacy_analysis_result(
     structured: SatelliteAnalysisStructured,
     intent: str = "image_understanding",
+    land_cover_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Converts SatelliteAnalysisStructured into the exact shape expected by
@@ -167,12 +168,18 @@ def to_legacy_analysis_result(
             "confidence": c_num,
         })
 
-    # Coverage estimation from findings
-    coverage: List[Dict[str, Any]] = [
-        {"class": "built-up", "coverage": 0.35, "color": "#f97316"},
-        {"class": "vegetation", "coverage": 0.45, "color": "#10b981"},
-        {"class": "water / other", "coverage": 0.20, "color": "#06b6d4"},
-    ]
+    # Objective land-cover coverage (only populated when measured from segmentation masks)
+    if land_cover_result and land_cover_result.get("available"):
+        coverage = land_cover_result.get("coverage", [])
+        land_cover_meta = land_cover_result
+    else:
+        coverage = []
+        land_cover_meta = {
+            "available": False,
+            "reason": "Segmentation unavailable",
+            "measured_from_masks": False,
+            "estimated": False,
+        }
 
     return {
         "answer": structured.answer_to_query,
@@ -180,6 +187,9 @@ def to_legacy_analysis_result(
         "objectsDetected": objects_detected,
         "confidence": 0.88,
         "coverage": coverage,
+        "land_cover": land_cover_meta,
+        "measured_from_masks": bool(land_cover_result and land_cover_result.get("measured_from_masks")),
+        "estimated": False,
         "regions": regions,
         "changeSummary": {
             "additions": [obs.finding for obs in structured.observations if "new" in obs.finding.lower()],

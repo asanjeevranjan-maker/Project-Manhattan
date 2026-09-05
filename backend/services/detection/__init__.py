@@ -59,6 +59,15 @@ from .segmentation import (
     get_sam2_predictor,
 )
 
+from .land_cover import (
+    LandCoverAnalyzer,
+    calculate_land_cover,
+    DEFAULT_CATEGORY_PRIORITY,
+    LABEL_TO_CATEGORY,
+    LAND_COVER_COLORS,
+    map_label_to_category,
+)
+
 __all__ = [
     "SATELLITE_CLASSES",
     "ANALYSIS_PRESETS",
@@ -103,5 +112,11 @@ __all__ = [
     "generate_overlay_preview",
     "segment_detections",
     "get_sam2_predictor",
+    "LandCoverAnalyzer",
+    "calculate_land_cover",
+    "DEFAULT_CATEGORY_PRIORITY",
+    "LABEL_TO_CATEGORY",
+    "LAND_COVER_COLORS",
+    "map_label_to_category",
 ]
 

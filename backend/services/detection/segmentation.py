@@ -590,3 +590,4 @@ def segment_detections(
         logger.error(f"[Segmentation] Error during segmentation execution: {error}", exc_info=True)
         # Never crash: fall back to unsegmented detections
         return _create_fallback_response(available=True, enabled=True)
+

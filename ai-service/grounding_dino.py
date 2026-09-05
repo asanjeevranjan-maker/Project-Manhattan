@@ -54,6 +54,7 @@ from dino_vocabulary import (
     SAM2_AVAILABLE,
     ENABLE_SEGMENTATION,
     segment_detections,
+    calculate_land_cover,
 )
 
 logger = logging.getLogger("satquery.grounding_dino")
@@ -360,6 +361,16 @@ def detect_objects(
             "overlay_preview": None,
         }
 
+    # 5. Objective Land-Cover Coverage Calculation (truthful pixel accounting)
+    seg_avail = seg_metadata.get("segmentation_available", False)
+    land_cover_result = calculate_land_cover(
+        image_size=(full_width, full_height),
+        detections=final_detections,
+        segmentation_available=seg_avail,
+        generate_visualization=True,
+        base_image=image,
+    )
+
     tiling_metadata = format_tile_metadata(
         tiles_info=tiles_debug_info,
         enabled=will_tile,
@@ -370,6 +381,7 @@ def detect_objects(
     )
     tiling_metadata["deduplication"] = dedup_stats
     tiling_metadata["segmentation"] = seg_metadata
+    tiling_metadata["land_cover"] = land_cover_result
 
     if return_tiling_metadata:
         return final_detections, tiling_metadata
