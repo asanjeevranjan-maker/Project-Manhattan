@@ -1,11 +1,21 @@
 [project]
 name = "satquery-backend"
-version = "0.1.0"
-description = "FastAPI backend for SatQuery"
+version = "0.2.0"
+description = "FastAPI backend for SatQuery with Enhanced Satellite Vision Pipeline"
 requires-python = ">=3.9"
 dependencies = [
     "fastapi>=0.100.0",
     "uvicorn>=0.22.0",
+    "httpx>=0.24.0",
+    "pillow>=10.0.0",
+    "pydantic>=2.0.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
 ]
 
 [tool.vercel]

@@ -1173,6 +1173,37 @@ export async function POST(
 
   } = body;
 
+  // -------------------------------------------------------
+  // Check if Python FastAPI vision service is running
+  // -------------------------------------------------------
+  const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://127.0.0.1:8000";
+  let isBackendAlive = false;
+  try {
+    const probe = await fetch(`${AI_SERVICE_URL}/health`, {
+      signal: AbortSignal.timeout(1500),
+    });
+    isBackendAlive = probe.ok;
+  } catch {
+    isBackendAlive = false;
+  }
+
+  if (isBackendAlive) {
+    try {
+      console.log("[/api/analyze] Forwarding analysis to Python FastAPI vision service...");
+      const pyRes = await fetch(`${AI_SERVICE_URL}/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(60000),
+      });
+      if (pyRes.ok) {
+        const pyData = await pyRes.json();
+        return NextResponse.json(pyData);
+      }
+    } catch (err) {
+      console.warn("[/api/analyze] Python backend request failed, continuing to TypeScript engine:", err);
+    }
+  }
 
   // -------------------------------------------------------
   // Debug

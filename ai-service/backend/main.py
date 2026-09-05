@@ -14,6 +14,11 @@ from typing import Optional
 # Ensure parent directory is in python path so satellite, image_registration, etc. can be imported
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Ensure root/backend is in python path for enhanced multimodal vision service
+root_backend = Path(__file__).resolve().parent.parent.parent / "backend"
+if str(root_backend) not in sys.path:
+    sys.path.insert(0, str(root_backend))
+
 import uvicorn
 from grounding_dino import detect_objects
 from satellite.provider_base import AOIBoundingBox, SatelliteSceneMetadata
@@ -21,6 +26,19 @@ from satellite.provider_service import satellite_service
 from image_registration import register_temporal_images
 from temporal_matcher import match_temporal_detections
 from pixel_change import compute_pixel_change
+
+try:
+    from services.vision.vision_service import vision_service
+    from services.vision.response_parser import to_legacy_analysis_result
+    from services.vision.base_provider import (
+        VisionProviderError,
+        VisionProviderAuthError,
+        VisionProviderRateLimitError,
+    )
+    VISION_SERVICE_AVAILABLE = True
+except Exception as _e:
+    print(f"[Warning] Failed to import vision service in ai-service: {_e}")
+    VISION_SERVICE_AVAILABLE = False
 
 
 # =========================================================
@@ -183,6 +201,80 @@ async def detect(
         print("\n[FASTAPI DETECTION ERROR]")
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": "Detection service failed.", "details": str(error)})
+
+
+# =========================================================
+# MULTIMODAL SATELLITE IMAGE ANALYSIS (GEMINI & GLM)
+# =========================================================
+
+@app.post("/analyze")
+@app.post("/api/analyze")
+async def analyze_image(req: dict):
+    if not VISION_SERVICE_AVAILABLE:
+        return JSONResponse(status_code=503, content={"error": "Vision service not loaded on backend."})
+
+    image_data = req.get("imageDataUrl") or req.get("image_data")
+    if not image_data:
+        return JSONResponse(status_code=400, content={"error": "Missing required image data."})
+
+    user_query = (req.get("user_query") or req.get("query") or "").strip()
+    if not user_query:
+        user_query = "Provide a comprehensive remote-sensing assessment of this satellite image."
+
+    provider = req.get("provider") or req.get("model") or "auto"
+    second_image = req.get("secondImageDataUrl") or req.get("second_image_data")
+    detection_context = req.get("detectionContext") or req.get("detection_context")
+    change_context = req.get("changeContext") or req.get("change_context")
+
+    try:
+        result = await vision_service.analyze_image(
+            image_data=image_data,
+            user_query=user_query,
+            provider=provider,
+            analysis_mode=req.get("analysis_mode", "general"),
+            analysis_depth=req.get("analysis_depth", "standard"),
+            use_detections=req.get("use_detections", True),
+            use_change_context=req.get("use_change_context", True),
+            use_tiles=req.get("use_tiles", False),
+            detection_context=detection_context,
+            change_context=change_context,
+            image_metadata=req.get("image_metadata"),
+            second_image_data=second_image,
+        )
+
+        structured = result["structured_analysis"]
+        legacy_analysis = to_legacy_analysis_result(structured, intent=req.get("analysis_mode", "image_understanding"))
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "provider": result["provider_used"],
+                "analysis_mode": result["analysis_mode"],
+                "query": result["query"],
+                "answer": structured.answer_to_query,
+                "summary": structured.summary,
+                "observations": [o.model_dump() for o in structured.observations],
+                "uncertainties": structured.uncertainties,
+                "context": {
+                    "grounding_dino_used": detection_context is not None and bool(detection_context.get("detections")),
+                    "change_detection_used": change_context is not None,
+                },
+                "processing_time_ms": result["processing_time_ms"],
+                "structured_analysis": structured.model_dump(),
+                "analysis": legacy_analysis,
+                "modelUsed": result["provider_used"],
+                "fallbackUsed": result["fallback_used"],
+            },
+        )
+    except VisionProviderAuthError as ae:
+        return JSONResponse(status_code=401, content={"error": str(ae)})
+    except VisionProviderRateLimitError as re:
+        return JSONResponse(status_code=429, content={"error": str(re)})
+    except VisionProviderError as ve:
+        return JSONResponse(status_code=ve.status_code or 502, content={"error": str(ve)})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Satellite analysis failed: {str(e)}"})
 
 
 # =========================================================

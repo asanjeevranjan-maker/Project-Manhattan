@@ -1,0 +1,279 @@
+"""
+Satellite and Remote-Sensing Vision Prompt Builder
+Shared prompt generation architecture for Gemini and GLM providers.
+"""
+
+from typing import Dict, Any, Optional, Tuple, List
+
+
+SYSTEM_INSTRUCTION = """You are an expert remote-sensing and geospatial image analyst.
+You analyze satellite and aerial imagery using only visible evidence and any metadata supplied to you.
+Your task is to provide technically useful, reliable observations while strictly avoiding unsupported claims.
+
+IMPORTANT RULES:
+1. Treat the image as remote-sensing / Earth observation imagery, not a ground-level photograph.
+2. Carefully inspect:
+   - land cover & soil exposure
+   - road networks & linear features
+   - buildings, roofs & built-up footprints
+   - vegetation canopy, crops & agricultural patterns
+   - water bodies, shorelines & drainage extents
+   - construction zones & earthworks
+   - infrastructure (bridges, runways, industrial sites)
+   - visible damage, scars & debris patterns
+   - spatial arrangements, density & object clusters
+3. If object-detection results are provided, use them as supporting evidence but independently verify whether they are visually plausible.
+4. If change-detection results are provided, explain the visible differences without inventing ungrounded real-world causes.
+5. Strictly separate:
+   - direct observations (what is visually present)
+   - likely interpretation (analytical context)
+   - uncertainty (limitations of sensor resolution, clouds, shadows, or viewing angle)
+6. Never claim exact geographic coordinates, object identity, building ownership, event cause, historical date, physical distance, area, or scale unless explicitly provided in metadata.
+7. If image resolution is insufficient to identify small objects (e.g. distinguishing cars vs shadows or small boats vs wave crests), explicitly report that limitation.
+8. Do not hallucinate vehicles, buildings, military assets, floods, fires, smoke, or damage that is not clearly visible.
+9. Use spatial localization terms:
+   - upper-left
+   - upper-right
+   - center
+   - lower-left
+   - lower-right
+   - widespread / distributed
+10. Prioritize evidence directly answering the user's question.
+11. Avoid generic image captions (e.g. "This image shows an urban area with roads and buildings"). Provide concrete, specific visual evidence.
+12. If uncertain between multiple interpretations, state the alternatives.
+13. Keep the answer concise, structured, and technically informative."""
+
+
+ANALYSIS_MODE_GUIDELINES: Dict[str, str] = {
+    "general": """ANALYSIS MODE: GENERAL LAND-COVER & SCENE UNDERSTANDING
+- Identify dominant land-cover classes (built-up, vegetation, water, bare soil, transport).
+- Note major spatial patterns, development intensity, and distinctive terrain features.
+- Evaluate overall visual texture, spectral reflectance contrasts, and surface distribution.""",
+
+    "objects": """ANALYSIS MODE: OBJECT DETECTION & ENUMERATION
+- Focus on discrete, localized structures or features matching the query (e.g. buildings, vessels, aircraft, storage tanks, bridges).
+- Describe spatial clustering, approximate density, and spatial distribution across image quadrants.
+- Categorize confidence based on clarity of geometric shapes, roof outlines, and contrast against background.""",
+
+    "changes": """ANALYSIS MODE: BI-TEMPORAL CHANGE DETECTION
+- Focus primarily on differences between Image 1 (BEFORE) and Image 2 (AFTER).
+- Highlight additions of structures, removals/clearance, vegetation loss or regrowth, water boundary expansion/recession, and ground disruption.
+- State WHAT visibly changed and WHERE; do NOT invent causes (e.g. economic growth, natural disasters) unless documented.""",
+
+    "urban": """ANALYSIS MODE: URBAN & SETTLEMENT PATTERNS
+- Analyze building density, roof outlines, and spatial layout (organic vs planned grid).
+- Identify road connectivity, intersections, parking or paved areas, and impervious surface ratio.
+- Note transitions between high-density built-up zones, commercial/industrial structures, and open or residential space.""",
+
+    "agriculture": """ANALYSIS MODE: AGRICULTURAL & RURAL MONITORING
+- Identify field boundaries, crop parcels, rectangular cultivation plots, and irrigation channels.
+- Note variations in vegetation vigour, fallow/bare fields, freshly tilled soil, and tree stands.
+- Look for visible patterns of water access, access tracks, and rural farm infrastructure.""",
+
+    "water": """ANALYSIS MODE: HYDROLOGY & WATER EXTENT
+- Delineate water bodies (rivers, lakes, reservoirs, ponds, canals, coastal waters).
+- Observe turbidity, sediment plumes, algae bloom indications, or water level fluctuations along shorelines.
+- Distinguish permanent deep water from shallow wetlands, drainage channels, or tidal mudflats.""",
+
+    "infrastructure": """ANALYSIS MODE: TRANSPORTATION & INFRASTRUCTURE
+- Map linear features: highways, primary roads, rail lines, runways, bridges, powerline corridors.
+- Assess connectivity, road surface condition hints, bridge crossings over water/terrain, and junction complexity.
+- Inspect large industrial facilities, port docks, logistic depots, and energy installations.""",
+
+    "disaster": """ANALYSIS MODE: DISASTER & DAMAGE ASSESSMENT (HIGH CAUTION)
+- Look for visible anomalies: standing water outside normal channels, structural collapse, debris accumulation, ground scouring, burn scars, or blocked roads.
+- Distinguish normal seasonal water from anomalous inundation.
+- Never claim disaster severity or causality without verifiable visual markers; clearly express uncertainties.""",
+
+    "landcover": """ANALYSIS MODE: LAND-COVER CLASSIFICATION
+- Categorize visible surfaces into standard classes: built-up, tree canopy / forest, cropland / pasture, barren soil / rock, surface water, road / paved.
+- Describe relative dominance qualitatively (e.g. predominantly forested with scattered clearings).
+- Avoid fake exact percentages unless supported by external segmentation masks.""",
+
+    "custom": """ANALYSIS MODE: CUSTOM FOCUSED INQUIRY
+- Strictly answer the user query based on visible remote-sensing evidence in the image.""",
+}
+
+
+JSON_OUTPUT_SPEC = """
+OUTPUT FORMAT:
+You must return a valid JSON object matching this exact schema:
+{
+  "summary": "Short direct answer summarizing the findings in 1-2 concise sentences",
+  "answer_to_query": "Detailed, direct answer to the user query referencing specific image evidence",
+  "observations": [
+    {
+      "finding": "Concise title of observed feature or pattern",
+      "location": "upper-left | upper-right | center | lower-left | lower-right | widespread",
+      "confidence": "high | medium | low",
+      "evidence": "Specific visible features (e.g., high-reflectance rectangular roofs with visible shadow orientation, dark linear channel with sediment plume)"
+    }
+  ],
+  "uncertainties": [
+    "Limitations regarding sensor resolution, cloud shadows, or ambiguous visual signatures"
+  ],
+  "model_notes": {
+    "used_detection_context": false,
+    "used_change_context": false
+  }
+}
+Return raw JSON ONLY. Do not prepend conversational filler. Ensure valid JSON syntax."""
+
+
+def format_detection_context(detection_context: Optional[Dict[str, Any]]) -> Optional[str]:
+    """
+    Summarizes machine-generated Grounding DINO detection results into a spatial summary.
+    Avoids dumping overwhelming raw pixel coordinates.
+    """
+    if not detection_context:
+        return None
+
+    raw_detections = detection_context.get("detections", [])
+    if not raw_detections and not isinstance(raw_detections, list):
+        return None
+
+    total_count = detection_context.get("count", len(raw_detections))
+    img_w = detection_context.get("width", 640) or 640
+    img_h = detection_context.get("height", 640) or 640
+
+    if not raw_detections:
+        return f"Grounding DINO detector ran but found 0 candidate objects matching the prompt."
+
+    # Group by label and compute spatial distribution
+    by_label: Dict[str, List[Dict[str, Any]]] = {}
+    for d in raw_detections:
+        lbl = str(d.get("label", "object")).strip()
+        by_label.setdefault(lbl, []).append(d)
+
+    lines: List[str] = [
+        f"MACHINE-GENERATED DETECTION HINTS (Grounding DINO):",
+        f"Total candidate detections: {total_count}"
+    ]
+
+    for lbl, items in by_label.items():
+        confidences = [float(i.get("confidence", 0.0)) for i in items if i.get("confidence") is not None]
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.85
+
+        # Spatial quadrant estimation
+        quadrants: Dict[str, int] = {"upper-left": 0, "upper-right": 0, "lower-left": 0, "lower-right": 0, "center": 0}
+        for i in items:
+            box = i.get("box")
+            if box and len(box) >= 4:
+                cx = (box[0] + box[2]) / 2
+                cy = (box[1] + box[3]) / 2
+                # Check center region (25% to 75%)
+                if 0.3 * img_w <= cx <= 0.7 * img_w and 0.3 * img_h <= cy <= 0.7 * img_h:
+                    quadrants["center"] += 1
+                elif cx < img_w / 2 and cy < img_h / 2:
+                    quadrants["upper-left"] += 1
+                elif cx >= img_w / 2 and cy < img_h / 2:
+                    quadrants["upper-right"] += 1
+                elif cx < img_w / 2 and cy >= img_h / 2:
+                    quadrants["lower-left"] += 1
+                else:
+                    quadrants["lower-right"] += 1
+
+        top_quads = [q for q, cnt in sorted(quadrants.items(), key=lambda x: x[1], reverse=True) if cnt > 0]
+        loc_desc = ", ".join(top_quads[:2]) if top_quads else "distributed across scene"
+
+        lines.append(f"- {len(items)} '{lbl}' candidates (avg confidence {avg_conf:.2f}), located predominantly in {loc_desc}")
+
+    lines.append("INSTRUCTION: Use these detections as supporting machine-generated hints. Independently inspect the image and do not blindly repeat detections if visual evidence is inconsistent.")
+    return "\n".join(lines)
+
+
+def format_change_context(change_context: Optional[Dict[str, Any]]) -> Optional[str]:
+    """
+    Summarizes bi-temporal radiometric change detection metadata.
+    Instructs model to explain WHAT changed without hallucinating causes.
+    """
+    if not change_context:
+        return None
+
+    lines: List[str] = ["MACHINE-GENERATED BI-TEMPORAL CHANGE CONTEXT:"]
+
+    change_pct = change_context.get("changePercentage") or change_context.get("change_percentage")
+    if change_pct is not None:
+        lines.append(f"- Estimated surface radiometric change: {change_pct}% of the compared area")
+
+    summary = change_context.get("summary")
+    if summary and isinstance(summary, dict):
+        new_cnt = summary.get("newCount", summary.get("new_count", 0))
+        rem_cnt = summary.get("removedCount", summary.get("removed_count", 0))
+        mod_cnt = summary.get("modifiedCount", summary.get("modified_count", 0))
+        lines.append(f"- Categorized object changes: {new_cnt} newly appeared, {rem_cnt} absent/removed, {mod_cnt} altered")
+
+    time_diff = change_context.get("timeDifference") or change_context.get("time_difference")
+    if time_diff:
+        lines.append(f"- Temporal baseline interval: {time_diff}")
+
+    lines.append("INSTRUCTION: Explain WHAT visible features or surfaces appear altered between the timestamps. Do not invent ungrounded real-world causes.")
+    return "\n".join(lines)
+
+
+def build_satellite_analysis_prompt(
+    user_query: str,
+    detection_context: Optional[Dict[str, Any]] = None,
+    change_context: Optional[Dict[str, Any]] = None,
+    image_metadata: Optional[Dict[str, Any]] = None,
+    analysis_mode: str = "general",
+    has_second_image: bool = False,
+    spatial_tile_label: Optional[str] = None,
+) -> Tuple[str, str]:
+    """
+    Builds separated (system_instruction, user_content) prompt components.
+    Safely embeds user query to prevent prompt injection.
+    """
+    mode_key = (analysis_mode or "general").lower().strip()
+    mode_instructions = ANALYSIS_MODE_GUIDELINES.get(mode_key, ANALYSIS_MODE_GUIDELINES["general"])
+
+    user_sections: List[str] = []
+
+    # 1. Tile Context (if tiled mode)
+    if spatial_tile_label:
+        user_sections.append(f"IMAGE SUB-TILE FOCUS: You are analyzing the [{spatial_tile_label.upper()}] quadrant of the overall satellite scene.")
+
+    # 2. Comparative Bi-Temporal Context
+    if has_second_image:
+        user_sections.append(
+            "IMAGE PAIR COMPARISON:\n"
+            "- Image 1 represents the BEFORE / Historical reference state.\n"
+            "- Image 2 represents the AFTER / Latest observation state.\n"
+            "- Compare corresponding spatial areas carefully. Disregard sensor variations and transient cloud shadows unless relevant."
+        )
+
+    # 3. Metadata Context
+    if image_metadata and isinstance(image_metadata, dict):
+        meta_items = [f"  - {k}: {v}" for k, v in image_metadata.items() if v is not None]
+        if meta_items:
+            user_sections.append("IMAGE METADATA:\n" + "\n".join(meta_items))
+
+    # 4. Detection Context
+    dino_formatted = format_detection_context(detection_context)
+    if dino_formatted:
+        user_sections.append(dino_formatted)
+
+    # 5. Change Context
+    change_formatted = format_change_context(change_context)
+    if change_formatted:
+        user_sections.append(change_formatted)
+
+    # 6. Mode-specific focus
+    user_sections.append(mode_instructions)
+
+    # 7. User Query (Strictly Isolated)
+    clean_query = user_query.strip() if user_query else "Provide a comprehensive remote-sensing assessment of this imagery."
+    user_sections.append(
+        "--------------------------------------------------\n"
+        f"USER ANALYTICAL QUERY:\n\"{clean_query}\"\n"
+        "--------------------------------------------------\n"
+        "Analyze the imagery to specifically answer this query using visible remote-sensing evidence."
+    )
+
+    # 8. Schema reminder
+    user_sections.append(JSON_OUTPUT_SPEC)
+
+    system_prompt = SYSTEM_INSTRUCTION
+    user_prompt = "\n\n".join(user_sections)
+
+    return system_prompt, user_prompt
