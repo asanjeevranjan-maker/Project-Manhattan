@@ -25,8 +25,9 @@ export async function POST(request: NextRequest) {
       apiKey,
     });
 
+    const model = process.env.GEMINI_MODEL || "gemini-3.6-flash";
     const response = await ai.models.generateContent({
-      model: "gemini-flash-latest",
+      model,
       contents: [
         {
           role: "user",

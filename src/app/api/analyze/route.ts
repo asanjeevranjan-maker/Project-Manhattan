@@ -863,7 +863,7 @@ async function callGemini(
   const model =
     process.env
       .GEMINI_MODEL ||
-    'gemini-flash-latest';
+    'gemini-3.6-flash';
 
 
   console.log(

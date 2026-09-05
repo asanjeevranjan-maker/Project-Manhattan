@@ -18,12 +18,44 @@ from .prompt_builder import build_satellite_analysis_prompt
 from .response_parser import SatelliteAnalysisStructured, parse_structured_response
 
 
+def _load_env_if_missing():
+    if not os.getenv("GEMINI_API_KEY"):
+        from pathlib import Path
+        for p in [
+            Path.cwd() / ".env",
+            Path.cwd() / "backend" / ".env",
+            Path(__file__).resolve().parent.parent.parent / ".env",
+            Path(__file__).resolve().parent.parent / ".env",
+        ]:
+            if p.exists() and p.is_file():
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith("#") and "=" in line:
+                                k, v = line.split("=", 1)
+                                if k.strip() not in os.environ:
+                                    os.environ[k.strip()] = v.strip().strip("\"'")
+                except Exception:
+                    pass
+
+
 class GeminiVisionProvider(VisionProvider):
     provider_name: str = "gemini"
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        self.model = model or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
+        self.api_key = api_key
+        self.model = model
+
+    @property
+    def effective_api_key(self) -> Optional[str]:
+        if not self.api_key and not os.getenv("GEMINI_API_KEY"):
+            _load_env_if_missing()
+        return self.api_key or os.getenv("GEMINI_API_KEY")
+
+    @property
+    def effective_model(self) -> str:
+        return self.model or os.getenv("GEMINI_MODEL") or "gemini-3.6-flash"
 
     async def analyze(
         self,
@@ -39,12 +71,14 @@ class GeminiVisionProvider(VisionProvider):
         temperature: float = 0.15,
         spatial_tile_label: Optional[str] = None,
     ) -> SatelliteAnalysisStructured:
-        if not self.api_key:
+        api_key = self.effective_api_key
+        if not api_key:
             raise VisionProviderAuthError(
                 "GEMINI_API_KEY is not configured.",
                 status_code=500,
                 provider="gemini",
             )
+        model = self.effective_model
 
         has_second = second_image_bytes is not None and len(second_image_bytes) > 0
         system_prompt, user_prompt = build_satellite_analysis_prompt(
@@ -80,7 +114,7 @@ class GeminiVisionProvider(VisionProvider):
                 }
             })
 
-        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
         payload = {
             "system_instruction": {

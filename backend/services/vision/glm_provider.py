@@ -18,12 +18,44 @@ from .prompt_builder import build_satellite_analysis_prompt
 from .response_parser import SatelliteAnalysisStructured, parse_structured_response
 
 
+def _load_env_if_missing():
+    if not os.getenv("ZAI_API_KEY") and not os.getenv("GLM_API_KEY"):
+        from pathlib import Path
+        for p in [
+            Path.cwd() / ".env",
+            Path.cwd() / "backend" / ".env",
+            Path(__file__).resolve().parent.parent.parent / ".env",
+            Path(__file__).resolve().parent.parent / ".env",
+        ]:
+            if p.exists() and p.is_file():
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith("#") and "=" in line:
+                                k, v = line.split("=", 1)
+                                if k.strip() not in os.environ:
+                                    os.environ[k.strip()] = v.strip().strip("\"'")
+                except Exception:
+                    pass
+
+
 class GLMVisionProvider(VisionProvider):
     provider_name: str = "glm"
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
-        self.api_key = api_key or os.getenv("ZAI_API_KEY") or os.getenv("GLM_API_KEY")
-        self.model = model or os.getenv("GLM_MODEL") or "glm-4.6v-flash"
+        self.api_key = api_key
+        self.model = model
+
+    @property
+    def effective_api_key(self) -> Optional[str]:
+        if not self.api_key and not os.getenv("ZAI_API_KEY") and not os.getenv("GLM_API_KEY"):
+            _load_env_if_missing()
+        return self.api_key or os.getenv("ZAI_API_KEY") or os.getenv("GLM_API_KEY")
+
+    @property
+    def effective_model(self) -> str:
+        return self.model or os.getenv("GLM_MODEL") or "glm-4.6v-flash"
 
     async def analyze(
         self,
@@ -39,12 +71,14 @@ class GLMVisionProvider(VisionProvider):
         temperature: float = 0.1,
         spatial_tile_label: Optional[str] = None,
     ) -> SatelliteAnalysisStructured:
-        if not self.api_key:
+        api_key = self.effective_api_key
+        if not api_key:
             raise VisionProviderAuthError(
                 "ZAI_API_KEY or GLM_API_KEY is not configured.",
                 status_code=500,
                 provider="glm",
             )
+        model = self.effective_model
 
         has_second = second_image_bytes is not None and len(second_image_bytes) > 0
         system_prompt, user_prompt = build_satellite_analysis_prompt(
@@ -74,7 +108,7 @@ class GLMVisionProvider(VisionProvider):
         endpoint = "https://api.z.ai/api/paas/v4/chat/completions"
 
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -90,7 +124,7 @@ class GLMVisionProvider(VisionProvider):
                     json=payload,
                     headers={
                         "Content-Type": "application/json",
-                        "Authorization": f"Bearer {self.api_key}",
+                        "Authorization": f"Bearer {api_key}",
                     },
                 )
             except httpx.TimeoutException:

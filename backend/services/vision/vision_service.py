@@ -19,16 +19,39 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
 
 
+def _load_env_if_missing():
+    if not os.getenv("GEMINI_API_KEY") and not os.getenv("ZAI_API_KEY") and not os.getenv("GLM_API_KEY"):
+        from pathlib import Path
+        for p in [
+            Path.cwd() / ".env",
+            Path.cwd() / "backend" / ".env",
+            Path(__file__).resolve().parent.parent.parent / ".env",
+            Path(__file__).resolve().parent.parent / ".env",
+        ]:
+            if p.exists() and p.is_file():
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith("#") and "=" in line:
+                                k, v = line.split("=", 1)
+                                if k.strip() not in os.environ:
+                                    os.environ[k.strip()] = v.strip().strip("\"'")
+                except Exception:
+                    pass
+
+
 class VisionService:
     def __init__(self):
         self.gemini = GeminiVisionProvider()
         self.glm = GLMVisionProvider()
 
     def get_available_providers(self) -> List[str]:
+        _load_env_if_missing()
         providers = []
-        if os.getenv("GEMINI_API_KEY"):
+        if self.gemini.effective_api_key:
             providers.append("gemini")
-        if os.getenv("ZAI_API_KEY") or os.getenv("GLM_API_KEY"):
+        if self.glm.effective_api_key:
             providers.append("glm")
         return providers
 
@@ -240,7 +263,7 @@ class VisionService:
             providers_to_try = [("gemini", self.gemini), ("glm", self.glm)]
         else:  # auto
             # Prefer Gemini if key present, else GLM
-            if os.getenv("GEMINI_API_KEY"):
+            if self.gemini.effective_api_key:
                 providers_to_try = [("gemini", self.gemini), ("glm", self.glm)]
             else:
                 providers_to_try = [("glm", self.glm), ("gemini", self.gemini)]

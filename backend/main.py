@@ -6,13 +6,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from services.vision.vision_service import vision_service
+import os
+from pathlib import Path
+from services.vision.vision_service import vision_service, _load_env_if_missing
 from services.vision.response_parser import to_legacy_analysis_result
 from services.vision.base_provider import (
     VisionProviderError,
     VisionProviderAuthError,
     VisionProviderRateLimitError,
 )
+
+_load_env_if_missing()
 
 logger = logging.getLogger("satquery.api")
 
