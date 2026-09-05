@@ -1,8 +1,8 @@
 // POST /api/temporal/latest
 //
-// Proxies Real-Time Bi-Temporal Comparison to the Python AI service when available,
-// or seamlessly falls back to Cloud-Native Satellite Imagery (Esri Wayback WMTS)
-// and Gemini Vision on serverless platforms like Vercel.
+// Proxies Real-Time Bi-Temporal Comparison to the Python AI service when running,
+// or seamlessly falls back to Cloud-Native Satellite Imagery (Esri Wayback WMTS),
+// Gemini Vision, and Sharp-powered pixel-by-pixel change detection.
 
 import { NextRequest, NextResponse } from "next/server";
 import { runCloudTemporalComparison } from "@/lib/cloud-temporal";
@@ -31,7 +31,11 @@ export async function POST(req: NextRequest) {
 
     if (contentType.includes("multipart/form-data")) {
       const reqFormData = await req.formData();
-      formDataToSend = reqFormData;
+      formDataToSend = new FormData();
+
+      for (const [key, val] of reqFormData.entries()) {
+        formDataToSend.append(key, val);
+      }
 
       const n = reqFormData.get("aoi_north");
       const s = reqFormData.get("aoi_south");
@@ -86,30 +90,40 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 1. Try local or dedicated AI service backend if reachable
-    if (AI_SERVICE_URL && formDataToSend) {
-      try {
-        const controller = new AbortController();
-        const timeoutMs = AI_SERVICE_URL.includes("127.0.0.1") || AI_SERVICE_URL.includes("localhost") ? 3500 : 30000;
-        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    // 1. Check if the Python AI service backend is alive with a fast health check probe
+    let backendOnline = false;
+    try {
+      const healthCheck = await fetch(`${AI_SERVICE_URL}/health`, {
+        signal: AbortSignal.timeout(1500),
+      });
+      backendOnline = healthCheck.ok;
+    } catch {
+      backendOnline = false;
+    }
 
+    // 2. If the backend is running, route directly to it with ample processing time
+    if (backendOnline && formDataToSend) {
+      try {
+        console.log("[/api/temporal/latest] Python backend is online! Routing comparison to AI service...");
         const aiRes = await fetch(`${AI_SERVICE_URL}/temporal/latest`, {
           method: "POST",
           body: formDataToSend,
-          signal: controller.signal,
+          signal: AbortSignal.timeout(180000), // 3 minutes for Grounding DINO + full OpenCV
         });
-        clearTimeout(timeoutId);
 
         if (aiRes.ok) {
           const data = await aiRes.json();
           return NextResponse.json(data);
+        } else {
+          console.warn(`[/api/temporal/latest] Python service returned HTTP ${aiRes.status}`);
         }
       } catch (backendErr) {
-        console.warn("[/api/temporal/latest] AI service unavailable, falling back to cloud-native engine:", backendErr);
+        console.warn("[/api/temporal/latest] Python backend execution timed out or failed:", backendErr);
       }
     }
 
-    // 2. Cloud-native fallback: direct Esri Wayback satellite retrieval & Gemini Vision
+    // 3. Cloud-native fallback: Esri Wayback satellite retrieval, Gemini Vision & Sharp pixel-by-pixel change mask
+    console.log("[/api/temporal/latest] Using cloud-native satellite comparison engine with Sharp pixel changes...");
     const cloudResult = await runCloudTemporalComparison({
       aoi,
       prompt,
