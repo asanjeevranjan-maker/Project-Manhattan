@@ -47,6 +47,8 @@ class VisionProvider(ABC):
         second_mime_type: Optional[str] = None,
         temperature: float = 0.2,
         spatial_tile_label: Optional[str] = None,
+        segmentation_summary: Optional[Dict[str, Any]] = None,
+        land_cover: Optional[Dict[str, Any]] = None,
     ) -> SatelliteAnalysisStructured:
         """
         Executes multimodal analysis and returns a normalized SatelliteAnalysisStructured object.

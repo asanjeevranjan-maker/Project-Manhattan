@@ -3,45 +3,35 @@ Satellite and Remote-Sensing Vision Prompt Builder
 Shared prompt generation architecture for Gemini and GLM providers.
 """
 
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Union
+from .context_builder import build_vision_context
 
 
 SYSTEM_INSTRUCTION = """You are an expert remote-sensing and geospatial image analyst.
-You analyze satellite and aerial imagery using only visible evidence and any metadata supplied to you.
+You analyze satellite and aerial imagery using only visible evidence and any machine-generated metadata supplied to you.
 Your task is to provide technically useful, reliable observations while strictly avoiding unsupported claims.
 
-IMPORTANT RULES:
-1. Treat the image as remote-sensing / Earth observation imagery, not a ground-level photograph.
-2. Carefully inspect:
-   - land cover & soil exposure
-   - road networks & linear features
-   - buildings, roofs & built-up footprints
-   - vegetation canopy, crops & agricultural patterns
-   - water bodies, shorelines & drainage extents
-   - construction zones & earthworks
-   - infrastructure (bridges, runways, industrial sites)
-   - visible damage, scars & debris patterns
-   - spatial arrangements, density & object clusters
-3. If object-detection results are provided, use them as supporting evidence but independently verify whether they are visually plausible.
-4. If change-detection results are provided, explain the visible differences without inventing ungrounded real-world causes.
-5. Strictly separate:
-   - direct observations (what is visually present)
-   - likely interpretation (analytical context)
-   - uncertainty (limitations of sensor resolution, clouds, shadows, or viewing angle)
+PRIMARY GROUNDING RULES:
+1. Treat detection and segmentation results as machine-generated evidence.
+   - Use them directly when answering the user's question.
+   - Do NOT independently invent objects or counts that conflict with the detection pipeline.
+   - For count queries (e.g. "How many buildings?"): PREFER the machine detection count over visual guesswork.
+   - For location queries (e.g. "Where are the buildings?"): USE the bounding box and mask spatial distribution.
+   - If visual inspection disagrees with supplied detections, explicitly report that uncertainty instead of overriding without evidence.
+2. For flood danger, hazard, or risk inquiries:
+   - Use the water mask extent, its spatial proximity to detected structures or built-up land cover, and any supplied elevation/terrain metadata.
+   - Phrase conclusions strictly as possible exposure or proximity (e.g. "structures in the lower-right are in close proximity to the delineated water body, indicating potential flood exposure during high-water events"), NOT as guaranteed flood risk or confirmed disaster.
+3. Strictly separate:
+   - observed objects (what is visually delineated and detected)
+   - calculated statistics (counts, percentages, and spatial metrics)
+   - model interpretation (analytical context and domain assessment)
+4. Treat the image as remote-sensing / Earth observation imagery, not a ground-level photograph.
+5. If change-detection results are provided, explain visible differences without inventing ungrounded real-world causes.
 6. Never claim exact geographic coordinates, object identity, building ownership, event cause, historical date, physical distance, area, or scale unless explicitly provided in metadata.
-7. If image resolution is insufficient to identify small objects (e.g. distinguishing cars vs shadows or small boats vs wave crests), explicitly report that limitation.
-8. Do not hallucinate vehicles, buildings, military assets, floods, fires, smoke, or damage that is not clearly visible.
-9. Use spatial localization terms:
-   - upper-left
-   - upper-right
-   - center
-   - lower-left
-   - lower-right
-   - widespread / distributed
-10. Prioritize evidence directly answering the user's question.
-11. Avoid generic image captions (e.g. "This image shows an urban area with roads and buildings"). Provide concrete, specific visual evidence.
-12. If uncertain between multiple interpretations, state the alternatives.
-13. Keep the answer concise, structured, and technically informative."""
+7. If image resolution is insufficient to identify small objects, explicitly report that limitation.
+8. Use standard spatial localization terms (left side, right side, center-left, center-right, upper-left, upper-right, center, lower-left, lower-right, widespread).
+9. Prioritize evidence directly answering the user's question.
+10. Keep answers concise, structured, evidence-grounded, and technically informative."""
 
 
 ANALYSIS_MODE_GUIDELINES: Dict[str, str] = {
@@ -99,18 +89,28 @@ JSON_OUTPUT_SPEC = """
 OUTPUT FORMAT:
 You must return a valid JSON object matching this exact schema:
 {
+  "answer": "Detailed, direct answer to the user query referencing specific image evidence and detector counts",
   "summary": "Short direct answer summarizing the findings in 1-2 concise sentences",
-  "answer_to_query": "Detailed, direct answer to the user query referencing specific image evidence",
+  "answer_to_query": "Detailed, direct answer to the user query (mirror of answer)",
+  "evidence": {
+    "detections_used": true,
+    "segmentation_used": true,
+    "land_cover_used": true
+  },
+  "calculated_statistics": {
+    "object_counts": {},
+    "land_cover_percentages": {}
+  },
   "observations": [
     {
       "finding": "Concise title of observed feature or pattern",
-      "location": "upper-left | upper-right | center | lower-left | lower-right | widespread",
+      "location": "upper-left | upper-right | center | lower-left | lower-right | widespread | left side | right side",
       "confidence": "high | medium | low",
       "evidence": "Specific visible features (e.g., high-reflectance rectangular roofs with visible shadow orientation, dark linear channel with sediment plume)"
     }
   ],
   "uncertainties": [
-    "Limitations regarding sensor resolution, cloud shadows, or ambiguous visual signatures"
+    "Limitations regarding sensor resolution, cloud shadows, or discrepancies between visual appearance and detector hints"
   ],
   "model_notes": {
     "used_detection_context": false,
@@ -219,10 +219,13 @@ def build_satellite_analysis_prompt(
     analysis_mode: str = "general",
     has_second_image: bool = False,
     spatial_tile_label: Optional[str] = None,
+    segmentation_summary: Optional[Dict[str, Any]] = None,
+    land_cover: Optional[Dict[str, Any]] = None,
+    image_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[str, str]:
     """
     Builds separated (system_instruction, user_content) prompt components.
-    Safely embeds user query to prevent prompt injection.
+    Safely embeds user query and grounded machine evidence to prevent prompt injection.
     """
     mode_key = (analysis_mode or "general").lower().strip()
     mode_instructions = ANALYSIS_MODE_GUIDELINES.get(mode_key, ANALYSIS_MODE_GUIDELINES["general"])
@@ -248,20 +251,26 @@ def build_satellite_analysis_prompt(
         if meta_items:
             user_sections.append("IMAGE METADATA:\n" + "\n".join(meta_items))
 
-    # 4. Detection Context
-    dino_formatted = format_detection_context(detection_context)
-    if dino_formatted:
-        user_sections.append(dino_formatted)
+    # 4. Machine Evidence Context (Detections, Segmentation, Land-Cover, Changes)
+    if detection_context or segmentation_summary or land_cover or change_context:
+        v_ctx = build_vision_context(
+            detections=detection_context,
+            segmentation_summary=segmentation_summary,
+            land_cover=land_cover,
+            change_detection=change_context,
+            image_size=image_size,
+        )
+        if v_ctx.get("summary_text"):
+            user_sections.append(v_ctx["summary_text"])
+    elif detection_context:
+        dino_formatted = format_detection_context(detection_context)
+        if dino_formatted:
+            user_sections.append(dino_formatted)
 
-    # 5. Change Context
-    change_formatted = format_change_context(change_context)
-    if change_formatted:
-        user_sections.append(change_formatted)
-
-    # 6. Mode-specific focus
+    # 5. Mode-specific focus
     user_sections.append(mode_instructions)
 
-    # 7. User Query (Strictly Isolated)
+    # 6. User Query (Strictly Isolated)
     clean_query = user_query.strip() if user_query else "Provide a comprehensive remote-sensing assessment of this imagery."
     user_sections.append(
         "--------------------------------------------------\n"
@@ -270,7 +279,7 @@ def build_satellite_analysis_prompt(
         "Analyze the imagery to specifically answer this query using visible remote-sensing evidence."
     )
 
-    # 8. Schema reminder
+    # 7. Schema reminder
     user_sections.append(JSON_OUTPUT_SPEC)
 
     system_prompt = SYSTEM_INSTRUCTION

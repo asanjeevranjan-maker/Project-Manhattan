@@ -73,6 +73,7 @@ try:
         LAND_COVER_COLORS,
         map_label_to_category,
     )
+    from services.vision.context_builder import build_vision_context
 except ImportError:
     # Direct relative import fallback
     from services.detection.vocabulary import *  # type: ignore
@@ -80,6 +81,7 @@ except ImportError:
     from services.detection.nms import *  # type: ignore
     from services.detection.segmentation import *  # type: ignore
     from services.detection.land_cover import *  # type: ignore
+    from services.vision.context_builder import *  # type: ignore
 
 __all__ = [
     "SATELLITE_CLASSES",
@@ -132,5 +134,6 @@ __all__ = [
     "LABEL_TO_CATEGORY",
     "LAND_COVER_COLORS",
     "map_label_to_category",
+    "build_vision_context",
 ]
 

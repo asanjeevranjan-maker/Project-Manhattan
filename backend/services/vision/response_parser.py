@@ -16,9 +16,19 @@ class ObservationItem(BaseModel):
     evidence: str = Field(default="", description="Specific observable visual evidence")
 
 
+class EvidenceMetadata(BaseModel):
+    detections_used: bool = Field(default=False, description="Whether Grounding DINO detection evidence was incorporated")
+    segmentation_used: bool = Field(default=False, description="Whether instance segmentation was incorporated")
+    land_cover_used: bool = Field(default=False, description="Whether mask-measured land-cover coverage was incorporated")
+    change_detection_used: bool = Field(default=False, description="Whether bi-temporal change detection was incorporated")
+
+
 class SatelliteAnalysisStructured(BaseModel):
-    summary: str = Field(description="Concise 1-2 sentence executive summary")
-    answer_to_query: str = Field(description="Direct, evidence-grounded answer to user query")
+    answer: str = Field(default="", description="Direct, evidence-grounded answer to user query")
+    summary: str = Field(default="", description="Concise 1-2 sentence executive summary")
+    answer_to_query: str = Field(default="", description="Direct, evidence-grounded answer to user query (mirror of answer)")
+    evidence: EvidenceMetadata = Field(default_factory=EvidenceMetadata, description="Evidence usage flags")
+    calculated_statistics: Dict[str, Any] = Field(default_factory=dict, description="Objective metrics, counts, and percentages")
     observations: List[ObservationItem] = Field(default_factory=list, description="Structured visual findings")
     uncertainties: List[str] = Field(default_factory=list, description="Caveats or resolution/sensor limitations")
     model_notes: Dict[str, Any] = Field(default_factory=dict, description="Metadata about context used")
@@ -45,6 +55,8 @@ def parse_structured_response(
     query: str,
     detection_used: bool = False,
     change_used: bool = False,
+    segmentation_used: bool = False,
+    land_cover_used: bool = False,
 ) -> SatelliteAnalysisStructured:
     """
     Parses LLM/VLM text output into SatelliteAnalysisStructured.
@@ -57,10 +69,31 @@ def parse_structured_response(
         if isinstance(data, dict):
             # Extract fields with safe defaults
             summary = str(data.get("summary") or "").strip()
-            answer = str(data.get("answer_to_query") or data.get("answer") or summary).strip()
+            answer = str(data.get("answer") or data.get("answer_to_query") or summary).strip()
 
             if not summary and answer:
                 summary = answer[:160] + "..." if len(answer) > 160 else answer
+            if not answer and summary:
+                answer = summary
+
+            # Extract evidence metadata flags
+            raw_ev = data.get("evidence")
+            if isinstance(raw_ev, dict):
+                evidence = EvidenceMetadata(
+                    detections_used=bool(raw_ev.get("detections_used", detection_used)),
+                    segmentation_used=bool(raw_ev.get("segmentation_used", segmentation_used)),
+                    land_cover_used=bool(raw_ev.get("land_cover_used", land_cover_used)),
+                    change_detection_used=bool(raw_ev.get("change_detection_used", change_used)),
+                )
+            else:
+                evidence = EvidenceMetadata(
+                    detections_used=detection_used,
+                    segmentation_used=segmentation_used,
+                    land_cover_used=land_cover_used,
+                    change_detection_used=change_used,
+                )
+
+            calculated_statistics = data.get("calculated_statistics") if isinstance(data.get("calculated_statistics"), dict) else {}
 
             raw_obs = data.get("observations", [])
             observations: List[ObservationItem] = []
@@ -72,13 +105,13 @@ def parse_structured_response(
                         confidence = str(item.get("confidence") or "medium").strip().lower()
                         if confidence not in ["high", "medium", "low"]:
                             confidence = "medium"
-                        evidence = str(item.get("evidence") or "").strip()
+                        evidence_str = str(item.get("evidence") or "").strip()
                         observations.append(
                             ObservationItem(
                                 finding=finding,
                                 location=location,
                                 confidence=confidence,
-                                evidence=evidence,
+                                evidence=evidence_str,
                             )
                         )
 
@@ -90,8 +123,11 @@ def parse_structured_response(
             model_notes.setdefault("used_change_context", change_used)
 
             return SatelliteAnalysisStructured(
+                answer=answer or "Visual inspection completed based on visible evidence.",
                 summary=summary or "Remote sensing analysis completed.",
                 answer_to_query=answer or "Visual inspection completed based on visible evidence.",
+                evidence=evidence,
+                calculated_statistics=calculated_statistics,
                 observations=observations,
                 uncertainties=uncertainties,
                 model_notes=model_notes,
@@ -113,9 +149,19 @@ def parse_structured_response(
         )
     ]
 
+    fallback_evidence = EvidenceMetadata(
+        detections_used=detection_used,
+        segmentation_used=segmentation_used,
+        land_cover_used=land_cover_used,
+        change_detection_used=change_used,
+    )
+
     return SatelliteAnalysisStructured(
+        answer=plain_text if plain_text else "Visual analysis completed based on supplied imagery.",
         summary=summary,
         answer_to_query=plain_text if plain_text else "Visual analysis completed based on supplied imagery.",
+        evidence=fallback_evidence,
+        calculated_statistics={},
         observations=fallback_obs,
         uncertainties=["Model response was in non-standard format; structured output reconstructed from text."],
         model_notes={
@@ -182,7 +228,8 @@ def to_legacy_analysis_result(
         }
 
     return {
-        "answer": structured.answer_to_query,
+        "answer": structured.answer or structured.answer_to_query,
+        "summary": structured.summary,
         "intent": intent,
         "objectsDetected": objects_detected,
         "confidence": 0.88,
@@ -191,6 +238,8 @@ def to_legacy_analysis_result(
         "measured_from_masks": bool(land_cover_result and land_cover_result.get("measured_from_masks")),
         "estimated": False,
         "regions": regions,
+        "evidence": structured.evidence.model_dump(),
+        "calculated_statistics": structured.calculated_statistics,
         "changeSummary": {
             "additions": [obs.finding for obs in structured.observations if "new" in obs.finding.lower()],
             "removals": [obs.finding for obs in structured.observations if "remov" in obs.finding.lower() or "absent" in obs.finding.lower()],

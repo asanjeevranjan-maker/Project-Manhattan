@@ -59,6 +59,10 @@ class AnalyzeRequest(BaseModel):
     detection_context: Optional[Dict[str, Any]] = Field(None, description="Alternative field for detection context")
     changeContext: Optional[Dict[str, Any]] = Field(None, description="Machine-generated change detection context")
     change_context: Optional[Dict[str, Any]] = Field(None, description="Alternative field for change context")
+    segmentation_summary: Optional[Dict[str, Any]] = Field(None, description="SAM2 segmentation metadata")
+    segmentation: Optional[Dict[str, Any]] = Field(None, description="Alternative field for segmentation summary")
+    land_cover: Optional[Dict[str, Any]] = Field(None, description="Objective mask-measured land cover statistics")
+    landCover: Optional[Dict[str, Any]] = Field(None, description="Alternative field for land cover")
     image_metadata: Optional[Dict[str, Any]] = Field(None, description="Optional image metadata (resolution, date, sensor)")
     history: Optional[List[Any]] = Field(default_factory=list, description="Optional conversational history")
 
@@ -143,6 +147,8 @@ async def analyze_image_endpoint(req: AnalyzeRequest):
     second_image = req.secondImageDataUrl or req.second_image_data
     detection_context = req.detectionContext or req.detection_context
     change_context = req.changeContext or req.change_context
+    segmentation_summary = req.segmentation_summary or req.segmentation
+    land_cover = req.land_cover or req.landCover
 
     try:
         result = await vision_service.analyze_image(
@@ -158,10 +164,16 @@ async def analyze_image_endpoint(req: AnalyzeRequest):
             change_context=change_context,
             image_metadata=req.image_metadata,
             second_image_data=second_image,
+            segmentation_summary=segmentation_summary,
+            land_cover=land_cover,
         )
 
         structured = result["structured_analysis"]
-        legacy_analysis = to_legacy_analysis_result(structured, intent=req.analysis_mode or "image_understanding")
+        legacy_analysis = to_legacy_analysis_result(
+            structured,
+            intent=req.analysis_mode or "image_understanding",
+            land_cover_result=land_cover,
+        )
 
         return JSONResponse(
             status_code=200,
@@ -170,13 +182,17 @@ async def analyze_image_endpoint(req: AnalyzeRequest):
                 "provider": result["provider_used"],
                 "analysis_mode": result["analysis_mode"],
                 "query": result["query"],
-                "answer": structured.answer_to_query,
+                "answer": structured.answer or structured.answer_to_query,
                 "summary": structured.summary,
+                "evidence": structured.evidence.model_dump(),
+                "calculated_statistics": structured.calculated_statistics,
                 "observations": [o.model_dump() for o in structured.observations],
                 "uncertainties": structured.uncertainties,
                 "context": {
                     "grounding_dino_used": detection_context is not None and bool(detection_context.get("detections")),
                     "change_detection_used": change_context is not None,
+                    "segmentation_used": segmentation_summary is not None and bool(segmentation_summary.get("segmentation_available")),
+                    "land_cover_used": land_cover is not None and bool(land_cover.get("available")),
                 },
                 "processing_time_ms": result["processing_time_ms"],
                 "structured_analysis": structured.model_dump(),

@@ -69,6 +69,8 @@ class VisionService:
         change_context: Optional[Dict[str, Any]] = None,
         image_metadata: Optional[Dict[str, Any]] = None,
         second_image_data: Optional[str] = None,
+        segmentation_summary: Optional[Dict[str, Any]] = None,
+        land_cover: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Main entrypoint for satellite image analysis.
@@ -104,6 +106,10 @@ class VisionService:
             logger.info(f"[Vision] Attached {len(active_detection.get('detections', []))} Grounding DINO detection hints")
         if active_change:
             logger.info("[Vision] Attached bi-temporal change context")
+        if land_cover:
+            logger.info("[Vision] Attached objective land-cover measurements")
+        if segmentation_summary:
+            logger.info("[Vision] Attached segmentation summary")
 
         # 2. Provider execution (Ensemble vs Single/Fallback)
         chosen_provider = provider.lower().strip() if provider else "auto"
@@ -121,6 +127,8 @@ class VisionService:
                 second_image_bytes=sec_bytes,
                 second_mime_type=sec_mime,
                 use_tiles=use_tiles,
+                segmentation_summary=segmentation_summary,
+                land_cover=land_cover,
             )
             elapsed_ms = int((time.time() - start_time) * 1000)
             result["processing_time_ms"] = elapsed_ms
@@ -139,6 +147,8 @@ class VisionService:
             second_image_bytes=sec_bytes,
             second_mime_type=sec_mime,
             use_tiles=use_tiles,
+            segmentation_summary=segmentation_summary,
+            land_cover=land_cover,
         )
 
         elapsed_ms = int((time.time() - start_time) * 1000)
@@ -168,6 +178,8 @@ class VisionService:
         second_image_bytes: Optional[bytes],
         second_mime_type: Optional[str],
         use_tiles: bool,
+        segmentation_summary: Optional[Dict[str, Any]] = None,
+        land_cover: Optional[Dict[str, Any]] = None,
     ) -> SatelliteAnalysisStructured:
         """Executes analysis for a specific provider, supporting optional 2x2 tiling and deep two-stage."""
         # 1. Optional Tiling Pipeline
@@ -206,6 +218,8 @@ class VisionService:
             image_metadata=image_metadata,
             second_image_bytes=second_image_bytes,
             second_mime_type=second_mime_type,
+            segmentation_summary=segmentation_summary,
+            land_cover=land_cover,
         )
 
         if tile_observations:
@@ -232,6 +246,8 @@ class VisionService:
                     image_metadata=image_metadata,
                     second_image_bytes=second_image_bytes,
                     second_mime_type=second_mime_type,
+                    segmentation_summary=segmentation_summary,
+                    land_cover=land_cover,
                 )
                 stage2_res.observations = base_res.observations
                 return stage2_res
@@ -254,6 +270,8 @@ class VisionService:
         second_image_bytes: Optional[bytes],
         second_mime_type: Optional[str],
         use_tiles: bool,
+        segmentation_summary: Optional[Dict[str, Any]] = None,
+        land_cover: Optional[Dict[str, Any]] = None,
     ) -> Tuple[SatelliteAnalysisStructured, str, bool]:
         """Runs preferred provider with automatic fallback if available."""
         # Determine preference order
@@ -285,6 +303,8 @@ class VisionService:
                     second_image_bytes=second_image_bytes,
                     second_mime_type=second_mime_type,
                     use_tiles=use_tiles,
+                    segmentation_summary=segmentation_summary,
+                    land_cover=land_cover,
                 )
                 fallback_used = idx > 0
                 return res, p_name, fallback_used
@@ -307,6 +327,8 @@ class VisionService:
         second_image_bytes: Optional[bytes],
         second_mime_type: Optional[str],
         use_tiles: bool,
+        segmentation_summary: Optional[Dict[str, Any]] = None,
+        land_cover: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Runs both Gemini and GLM and computes consensus and disagreement findings."""
         logger.info("[Vision] Running dual-provider ensemble (Gemini + GLM)...")
@@ -316,7 +338,8 @@ class VisionService:
         try:
             gemini_res = await self._execute_provider_analysis(
                 self.gemini, image_bytes, mime_type, user_query, analysis_mode, analysis_depth,
-                detection_context, change_context, image_metadata, second_image_bytes, second_mime_type, use_tiles
+                detection_context, change_context, image_metadata, second_image_bytes, second_mime_type, use_tiles,
+                segmentation_summary, land_cover
             )
         except Exception as ge:
             logger.warning(f"[Vision Ensemble] Gemini call failed: {ge}")
@@ -324,7 +347,8 @@ class VisionService:
         try:
             glm_res = await self._execute_provider_analysis(
                 self.glm, image_bytes, mime_type, user_query, analysis_mode, analysis_depth,
-                detection_context, change_context, image_metadata, second_image_bytes, second_mime_type, use_tiles
+                detection_context, change_context, image_metadata, second_image_bytes, second_mime_type, use_tiles,
+                segmentation_summary, land_cover
             )
         except Exception as gle:
             logger.warning(f"[Vision Ensemble] GLM call failed: {gle}")

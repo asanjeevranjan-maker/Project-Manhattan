@@ -70,6 +70,8 @@ class GLMVisionProvider(VisionProvider):
         second_mime_type: Optional[str] = None,
         temperature: float = 0.1,
         spatial_tile_label: Optional[str] = None,
+        segmentation_summary: Optional[Dict[str, Any]] = None,
+        land_cover: Optional[Dict[str, Any]] = None,
     ) -> SatelliteAnalysisStructured:
         api_key = self.effective_api_key
         if not api_key:
@@ -89,6 +91,8 @@ class GLMVisionProvider(VisionProvider):
             analysis_mode=analysis_mode,
             has_second_image=has_second,
             spatial_tile_label=spatial_tile_label,
+            segmentation_summary=segmentation_summary,
+            land_cover=land_cover,
         )
 
         b64_primary = base64.b64encode(image_bytes).decode("utf-8")
@@ -178,4 +182,6 @@ class GLMVisionProvider(VisionProvider):
             query=user_query,
             detection_used=detection_context is not None and bool(detection_context.get("detections")),
             change_used=change_context is not None,
+            segmentation_used=bool(segmentation_summary and segmentation_summary.get("segmentation_available")),
+            land_cover_used=bool(land_cover and land_cover.get("available")),
         )
