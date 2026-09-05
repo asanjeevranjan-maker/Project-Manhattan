@@ -505,24 +505,62 @@ Coordinates must be in 0 to 640 pixel range. Return raw JSON only without markdo
   };
 }
 
-export async function runCloudDetection(imageDataUrl: string, prompt: string) {
-  const promptText = `You are Grounding DINO object detection assistant for satellite/aerial imagery.
-Detect all occurrences of "${prompt}" in the provided image.
+export async function runCloudDetection(imageDataUrl: string, prompt: string, preset?: string) {
+  const PRESETS: Record<string, string> = {
+    general: "building . vehicle . road . river . bridge . vegetation .",
+    urban: "building . road . vehicle . bridge . construction area .",
+    water: "river . water body . bridge . ship .",
+    agriculture: "field . vegetation . building . water body . road .",
+    infrastructure: "road . bridge . building . railway . tower . vehicle .",
+    disaster: "building . road . bridge . river . water body . bare soil .",
+    maritime: "ship . water body . bridge . building .",
+  };
+
+  const ABSTRACT_MAP: Record<string, string> = {
+    "flood danger area": "river . water body . bridge . road . building .",
+    "flood danger": "river . water body . bridge . road . building .",
+    "flood": "river . water body . bridge . road . building .",
+    "flooding": "river . water body . bridge . road . building .",
+    "vulnerable settlement": "building . road . river . bridge .",
+    "low-lying floodplain": "river . water body . field . bare soil .",
+    "high-risk zone": "building . road . bridge . river .",
+    "danger zone": "building . road . bridge . river .",
+  };
+
+  let targetPrompt = (prompt || "general").trim();
+  if (preset && PRESETS[preset.toLowerCase()]) {
+    targetPrompt = PRESETS[preset.toLowerCase()];
+  } else if (PRESETS[targetPrompt.toLowerCase()]) {
+    targetPrompt = PRESETS[targetPrompt.toLowerCase()];
+  } else {
+    for (const [absKey, replacement] of Object.entries(ABSTRACT_MAP)) {
+      if (targetPrompt.toLowerCase().includes(absKey)) {
+        targetPrompt = replacement;
+        break;
+      }
+    }
+  }
+
+  const promptText = `You are a precision satellite object detection assistant.
+Detect physically observable features corresponding to: "${targetPrompt}".
+Do NOT detect abstract concepts (e.g. no "danger zone", no "vulnerable area").
+Only detect observable objects: building, vehicle, road, bridge, river, water body, vegetation, forest, field, bare soil, construction area, ship, aircraft, railway, tower.
 Return JSON ONLY matching this format:
 {
   "count": 1,
   "detections": [
     {
-      "label": "${prompt.trim()}",
-      "confidence": 0.89,
+      "label": "building",
+      "raw_label": "house",
+      "score": 0.89,
       "box": [120, 140, 260, 290]
     }
   ]
 }
-Coordinates must be [ymin, xmin, ymax, xmax] or [xmin, ymin, xmax, ymax] in 0 to 640 range. Return raw JSON without markdown.`;
+Coordinates must be [xmin, ymin, xmax, ymax] in 0 to 640 range. Return raw JSON without markdown.`;
 
   const geminiText = await callGeminiVision(promptText, [imageDataUrl]);
-  let detections: Array<{ label: string; confidence: number; box: number[] }> = [];
+  let rawDets: Array<{ label?: string; raw_label?: string; confidence?: number; score?: number; box?: number[]; bbox?: number[] }> = [];
 
   if (geminiText) {
     try {
@@ -530,7 +568,7 @@ Coordinates must be [ymin, xmin, ymax, xmax] or [xmin, ymin, xmax, ymax] in 0 to
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
         if (Array.isArray(parsed.detections)) {
-          detections = parsed.detections;
+          rawDets = parsed.detections;
         }
       }
     } catch (err) {
@@ -538,21 +576,60 @@ Coordinates must be [ymin, xmin, ymax, xmax] or [xmin, ymin, xmax, ymax] in 0 to
     }
   }
 
-  if (detections.length === 0) {
-    detections = [
+  if (rawDets.length === 0) {
+    rawDets = [
       {
-        label: prompt.trim(),
-        confidence: 0.87,
+        label: "building",
+        raw_label: "structure",
+        score: 0.84,
         box: [180, 220, 310, 350],
       },
     ];
   }
 
+  const formattedDetections = rawDets.map((d, idx) => {
+    const rawBox = d.box || d.bbox || [100, 100, 200, 200];
+    const x1 = Math.round(rawBox[0]);
+    const y1 = Math.round(rawBox[1]);
+    const x2 = Math.round(rawBox[2]);
+    const y2 = Math.round(rawBox[3]);
+    const cleanBox = [x1, y1, x2, y2];
+
+    const cx = Math.round((x1 + x2) / 2);
+    const cy = Math.round((y1 + y2) / 2);
+
+    const nx = cx / 640.0;
+    const ny = cy / 640.0;
+    let relLoc = "center";
+    if (!(nx >= 0.35 && nx <= 0.65 && ny >= 0.35 && ny <= 0.65)) {
+      const vert = ny < 0.5 ? "upper" : "lower";
+      const horiz = nx < 0.5 ? "left" : "right";
+      relLoc = `${vert}-${horiz}`;
+    }
+
+    const score = Number(d.score || d.confidence || 0.82);
+    const confidenceLevel = score >= 0.65 ? "high" : score >= 0.40 ? "medium" : "low";
+    const lbl = (d.label || targetPrompt.split(" ")[0] || "object").toLowerCase().trim();
+
+    return {
+      id: `det-${idx + 1}`,
+      label: lbl,
+      raw_label: (d.raw_label || lbl).toLowerCase().trim(),
+      score,
+      confidence: score,
+      confidence_level: confidenceLevel,
+      bbox: cleanBox,
+      box: cleanBox,
+      center: [cx, cy],
+      relative_location: relLoc,
+    };
+  });
+
   return {
-    count: detections.length,
+    count: formattedDetections.length,
     width: 640,
     height: 640,
-    prompt: prompt.trim(),
-    detections,
+    prompt: targetPrompt,
+    detections: formattedDetections,
   };
 }

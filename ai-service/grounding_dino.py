@@ -1,387 +1,146 @@
-import torch
+"""
+Grounding DINO Object Detector for Satellite Imagery.
+Enhanced with concrete observable class vocabulary, presets, class-specific thresholds,
+label normalization, geometry validation, and structured output formatting.
+"""
 
+import sys
+import logging
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
 from PIL import Image
-
+import torch
 from transformers import (
     AutoProcessor,
     AutoModelForZeroShotObjectDetection,
 )
 
+# Ensure ai-service and backend are on sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+root_backend = Path(__file__).resolve().parent.parent / "backend"
+if str(root_backend) not in sys.path:
+    sys.path.insert(0, str(root_backend))
 
-MODEL_ID = "IDEA-Research/grounding-dino-base"
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-print("Using device:", device)
-print("Loading model:", MODEL_ID)
-
-
-processor = AutoProcessor.from_pretrained(
-    MODEL_ID
+from dino_vocabulary import (
+    SATELLITE_CLASSES,
+    ANALYSIS_PRESETS,
+    DEFAULT_CLASS_THRESHOLDS,
+    get_class_threshold,
+    normalize_label,
+    sanitize_prompt,
+    map_score_to_confidence_level,
+    compute_relative_location,
+    format_detection,
+    filter_and_format_detections,
+    remove_duplicate_detections,
+    box_iou,
 )
 
-model = AutoModelForZeroShotObjectDetection.from_pretrained(
-    MODEL_ID
-).to(device)
+logger = logging.getLogger("satquery.grounding_dino")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
 
+
+MODEL_ID = "IDEA-Research/grounding-dino-base"
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+logger.info(f"Using compute device: {device}")
+logger.info(f"Loading Grounding DINO model: {MODEL_ID}")
+
+processor = AutoProcessor.from_pretrained(MODEL_ID)
+model = AutoModelForZeroShotObjectDetection.from_pretrained(MODEL_ID).to(device)
 model.eval()
 
 
 # ------------------------------------------------
-# Tuning constants
+# Tuning constants & Base Thresholds
 # ------------------------------------------------
-
-# Minimum score to keep a detection at all.
-# Raised from 0.24 to filter out weak hits.
-BOX_THRESHOLD = 0.35
-
-# Minimum text-alignment score.
-# Raised from 0.20 to reduce hallucination.
-TEXT_THRESHOLD = 0.28
-
-# Hard post-filter: drop anything below this
-# even if it passed the model thresholds.
-MIN_CONFIDENCE = 0.35
-
-# Maximum fraction of a tile that a single box
-# may cover (reduced from 0.18 to 0.12).
-MAX_AREA_RATIO = 0.12
-
-# NMS IoU threshold for duplicate removal
-# (tightened from 0.35 to 0.25).
-NMS_IOU_THRESHOLD = 0.25
+BASE_BOX_THRESHOLD = 0.25      # Broad candidate collection; filtered by class thresholds
+BASE_TEXT_THRESHOLD = 0.22     # Text matching threshold
+NMS_IOU_THRESHOLD = 0.25       # IoU for deduplicating overlapping detections of the same class
+TILE_SIZE = 512
+TILE_OVERLAP = 96
 
 
 # ------------------------------------------------
-# Class families for geometry validation
+# Geometry Validation Guards
 # ------------------------------------------------
-
-# Labels that should produce long thin boxes
-# (roads, bridges, runways).
-ELONGATED_LABELS = {
-    "road", "street", "highway", "pathway",
-    "paved road", "roadway", "path",
-    "bridge", "overpass", "viaduct", "flyover",
-    "runway",
-}
-
-# Labels that represent point-like compact objects
-# (vehicles, cars, trucks).
-COMPACT_LABELS = {
-    "car", "vehicle", "truck", "bus", "van",
-    "lorry", "automobile",
-}
-
-# Labels that represent large elongated watercraft.
-SHIP_LABELS = {
-    "ship", "vessel", "cargo ship", "tanker",
-    "boat", "freighter", "ferry",
-}
-
-# Labels that represent compact rooftop structures.
-BUILDING_LABELS = {
-    "building", "structure", "rooftop",
-    "warehouse", "factory", "house",
-    "residential building",
-}
-
-# Labels that represent aircraft.
-AIRCRAFT_LABELS = {
-    "aircraft", "airplane", "jet", "plane",
-    "helicopter",
-}
-
-
-def _classify_label(label: str) -> str:
-    """Return the geometry family of a detected label."""
-    lower = label.lower().strip()
-    for word in ELONGATED_LABELS:
-        if word in lower:
-            return "elongated"
-    for word in COMPACT_LABELS:
-        if word in lower:
-            return "compact"
-    for word in SHIP_LABELS:
-        if word in lower:
-            return "ship"
-    for word in BUILDING_LABELS:
-        if word in lower:
-            return "building"
-    for word in AIRCRAFT_LABELS:
-        if word in lower:
-            return "aircraft"
-    return "generic"
-
-
-# ------------------------------------------------
-# IOU
-# ------------------------------------------------
-
-def box_iou(box1, box2):
-
-    x1 = max(box1[0], box2[0])
-    y1 = max(box1[1], box2[1])
-    x2 = min(box1[2], box2[2])
-    y2 = min(box1[3], box2[3])
-
-    intersection_w = max(0, x2 - x1)
-    intersection_h = max(0, y2 - y1)
-    intersection = intersection_w * intersection_h
-
-    area1 = max(0, box1[2] - box1[0]) * max(0, box1[3] - box1[1])
-    area2 = max(0, box2[2] - box2[0]) * max(0, box2[3] - box2[1])
-
-    union = area1 + area2 - intersection
-
-    if union <= 0:
-        return 0
-
-    return intersection / union
-
-
-# ------------------------------------------------
-# NMS-style duplicate removal
-# ------------------------------------------------
-
-def remove_duplicates(
-    detections,
-    iou_threshold=NMS_IOU_THRESHOLD,
-):
-    """
-    Sort by confidence (highest first), then greedily keep
-    detections that do not heavily overlap with already-kept
-    boxes of the same label.
-    """
-    detections = sorted(
-        detections,
-        key=lambda x: x["confidence"],
-        reverse=True,
-    )
-
-    kept = []
-
-    for detection in detections:
-
-        duplicate = False
-
-        for existing in kept:
-
-            # Only compare same-class boxes
-            if (
-                detection["label"].lower()
-                !=
-                existing["label"].lower()
-            ):
-                continue
-
-            iou = box_iou(
-                detection["box"],
-                existing["box"],
-            )
-
-            if iou > iou_threshold:
-                duplicate = True
-                break
-
-        if not duplicate:
-            kept.append(detection)
-
-    return kept
-
-
-# ------------------------------------------------
-# Generic geometry guard
-# ------------------------------------------------
-
-def valid_box(
-    box,
-    image_width,
-    image_height,
-):
-    """
-    Reject boxes that are clearly noise regardless
-    of the detected class.
-    """
+def valid_box(box: List[float], image_width: int, image_height: int) -> bool:
+    """Rejects bounding boxes that are non-positive or clear image-boundary noise."""
     x1, y1, x2, y2 = box
-
     width = x2 - x1
     height = y2 - y1
 
     if width <= 0 or height <= 0:
         return False
 
-    box_area = width * height
-    image_area = image_width * image_height
-
-    area_ratio = box_area / image_area
-
-    # Reject extremely tiny detections
-    if width < 10 or height < 10:
+    # Reject tiny noise under 8x8 px
+    if width < 8 or height < 8:
         return False
 
-    # Reject boxes covering too large a fraction
-    # of the tile (reduced from 0.18 to 0.12)
-    if area_ratio > MAX_AREA_RATIO:
-        return False
-
-    # Reject unusually wide boxes
-    if width > image_width * 0.60:
-        return False
-
-    # Reject unusually tall boxes
-    if height > image_height * 0.80:
+    # Reject boxes covering more than 40% of the entire image tile (unless water body)
+    area = width * height
+    image_area = max(1, image_width * image_height)
+    if area / float(image_area) > 0.40:
         return False
 
     return True
 
-
-# ------------------------------------------------
-# Class-specific geometry guard
-# ------------------------------------------------
 
 def class_valid_box(
-    box,
-    label: str,
-    image_width,
-    image_height,
-):
+    box: List[float],
+    canonical_label: str,
+    image_width: int,
+    image_height: int,
+) -> bool:
     """
-    Additional per-class checks that catch the most
-    common false-positive patterns in satellite imagery.
-
-    Returns False to discard a detection that passes
-    the generic filter but violates class-specific
-    shape expectations.
+    Applies class-specific geometric constraints (aspect ratio, maximum tile coverage)
+    to suppress hallucinated false-positive shapes.
     """
     x1, y1, x2, y2 = box
-
     width = x2 - x1
     height = y2 - y1
 
     if width <= 0 or height <= 0:
         return False
 
-    # Aspect ratio: width / height
-    # > 1  → wider than tall
-    # < 1  → taller than wide
-    aspect = width / height if height > 0 else 0
+    aspect = width / float(height) if height > 0 else 0.0
+    area = width * height
+    image_area = max(1, image_width * image_height)
+    area_ratio = area / float(image_area)
 
-    box_area = width * height
-    image_area = image_width * image_height
-    area_ratio = box_area / image_area
+    thresh = get_class_threshold(canonical_label)
 
-    family = _classify_label(label)
+    # Area ratio ceiling
+    if area_ratio > thresh.max_area_ratio:
+        logger.debug(
+            f"Filtered {canonical_label!r}: area_ratio={area_ratio:.3f} > max={thresh.max_area_ratio:.3f}"
+        )
+        return False
 
-    # --------------------------------------------------
-    # Roads / Bridges / Runways
-    # Must be elongated (aspect >= 1.8 OR <= 0.55)
-    # A ship-shaped box in water would be boxy or
-    # moderately elongated — that is rejected here.
-    # --------------------------------------------------
-    if family == "elongated":
-
-        is_horizontal = aspect >= 1.8
-        is_vertical = aspect <= 0.55
-
-        if not (is_horizontal or is_vertical):
-            print(
-                f"  [FILTER] Rejected {label!r}: "
-                f"aspect={aspect:.2f} not elongated enough "
-                f"for a road/bridge"
-            )
-            return False
-
-        # Roads should not be huge blobs
-        if area_ratio > 0.10:
-            print(
-                f"  [FILTER] Rejected {label!r}: "
-                f"area_ratio={area_ratio:.3f} too large"
-            )
-            return False
-
-    # --------------------------------------------------
-    # Vehicles / Cars / Trucks
-    # Must be small and compact.
-    # --------------------------------------------------
-    elif family == "compact":
-
-        if area_ratio > 0.025:
-            print(
-                f"  [FILTER] Rejected {label!r}: "
-                f"area_ratio={area_ratio:.3f} too large for a vehicle"
-            )
-            return False
-
-        # Not wildly elongated (not a road misdetected as car)
-        if aspect > 4.0 or aspect < 0.25:
-            print(
-                f"  [FILTER] Rejected {label!r}: "
-                f"aspect={aspect:.2f} too extreme for a vehicle"
-            )
-            return False
-
-    # --------------------------------------------------
-    # Ships / Vessels
-    # Typically elongated (bow to stern).
-    # Not overly small, not absurdly large.
-    # --------------------------------------------------
-    elif family == "ship":
-
-        # Ships take up a reasonable patch of a tile
-        if area_ratio < 0.003:
-            print(
-                f"  [FILTER] Rejected {label!r}: "
-                f"area_ratio={area_ratio:.4f} too small for a ship"
-            )
-            return False
-
-        if area_ratio > MAX_AREA_RATIO:
-            print(
-                f"  [FILTER] Rejected {label!r}: "
-                f"area_ratio={area_ratio:.3f} too large for a ship"
-            )
-            return False
-
-    # --------------------------------------------------
-    # Buildings
-    # Should be roughly square or compact,
-    # not extremely elongated.
-    # --------------------------------------------------
-    elif family == "building":
-
-        if aspect > 5.0 or aspect < 0.2:
-            print(
-                f"  [FILTER] Rejected {label!r}: "
-                f"aspect={aspect:.2f} too extreme for a building"
-            )
-            return False
-
-    # --------------------------------------------------
-    # Aircraft
-    # Moderate size, somewhat elongated.
-    # --------------------------------------------------
-    elif family == "aircraft":
-
-        if area_ratio > 0.06:
-            print(
-                f"  [FILTER] Rejected {label!r}: "
-                f"area_ratio={area_ratio:.3f} too large for aircraft"
-            )
-            return False
+    # Aspect ratio bounds
+    if aspect < thresh.min_aspect or aspect > thresh.max_aspect:
+        logger.debug(
+            f"Filtered {canonical_label!r}: aspect={aspect:.2f} outside [{thresh.min_aspect:.2f}, {thresh.max_aspect:.2f}]"
+        )
+        return False
 
     return True
 
 
 # ------------------------------------------------
-# Grounding DINO on one tile
+# Tile-Level Inference
 # ------------------------------------------------
-
 def run_model_on_image(
     image: Image.Image,
     prompt: str,
-    threshold=BOX_THRESHOLD,
-    text_threshold=TEXT_THRESHOLD,
-):
+    box_threshold: float = BASE_BOX_THRESHOLD,
+    text_threshold: float = BASE_TEXT_THRESHOLD,
+) -> List[Dict[str, Any]]:
+    """
+    Runs Grounding DINO on a single image or image crop.
+    Normalizes labels, filters out truncated / stopword noise, and checks class-specific thresholds.
+    """
     inputs = processor(
         images=image,
         text=prompt,
@@ -391,203 +150,151 @@ def run_model_on_image(
     with torch.no_grad():
         outputs = model(**inputs)
 
-    results = (
-        processor
-        .post_process_grounded_object_detection(
-            outputs,
-            inputs.input_ids,
-            threshold=threshold,
-            text_threshold=text_threshold,
-            target_sizes=[
-                image.size[::-1]
-            ],
-        )
+    results = processor.post_process_grounded_object_detection(
+        outputs,
+        inputs.input_ids,
+        threshold=box_threshold,
+        text_threshold=text_threshold,
+        target_sizes=[image.size[::-1]],
     )
 
     result = results[0]
+    raw_labels = result.get("text_labels", result.get("labels", []))
+    boxes = result["boxes"]
+    scores = result["scores"]
 
-    labels = result.get(
-        "text_labels",
-        result.get("labels", []),
-    )
+    detections: List[Dict[str, Any]] = []
 
-    detections = []
+    for box_tensor, score_tensor, raw_label_val in zip(boxes, scores, raw_labels):
+        confidence = float(score_tensor)
 
-    for box, score, label in zip(
-        result["boxes"],
-        result["scores"],
-        labels,
-    ):
-        confidence = float(score)
-
-        # Hard confidence floor — discard weak hits
-        if confidence < MIN_CONFIDENCE:
+        # 1. Normalize label and reject truncated or stopword junk (e.g. 'a', 'l', 'all')
+        canonical_label, cleaned_raw = normalize_label(raw_label_val)
+        if not canonical_label:
+            logger.debug(f"Discarding invalid / truncated label: {raw_label_val!r}")
             continue
 
-        box_list = [
-            float(v)
-            for v in box.tolist()
-        ]
-
-        # Generic geometry check
-        if not valid_box(
-            box_list,
-            image.width,
-            image.height,
-        ):
+        # 2. Check class-specific score threshold
+        thresh = get_class_threshold(canonical_label)
+        if confidence < thresh.min_score:
+            logger.debug(
+                f"Discarding {canonical_label!r}: score {confidence:.3f} < min {thresh.min_score:.3f}"
+            )
             continue
 
-        # Class-specific geometry check
-        if not class_valid_box(
-            box_list,
-            str(label),
-            image.width,
-            image.height,
-        ):
+        box_list = [float(v) for v in box_tensor.tolist()]
+
+        # 3. Geometric bounds check
+        if not valid_box(box_list, image.width, image.height):
             continue
 
-        detections.append(
-            {
-                "label": str(label),
-                "confidence": confidence,
-                "box": box_list,
-            }
-        )
+        # 4. Class-specific geometry check
+        if not class_valid_box(box_list, canonical_label, image.width, image.height):
+            continue
+
+        detections.append({
+            "label": canonical_label,
+            "raw_label": cleaned_raw,
+            "score": confidence,
+            "confidence": confidence,
+            "box": box_list,
+        })
 
     return detections
 
 
 # ------------------------------------------------
-# Create overlapping tiles
+# Overlapping Tile Generation
 # ------------------------------------------------
-
 def create_tiles(
-    image,
-    tile_size=512,
-    overlap=96,
-):
-    """
-    Split image into overlapping tiles.
-    Overlap reduced to 96 px (from 128) to
-    reduce redundant area while still ensuring
-    objects near tile boundaries are captured.
-    """
+    image: Image.Image,
+    tile_size: int = TILE_SIZE,
+    overlap: int = TILE_OVERLAP,
+) -> List[Tuple[Image.Image, int, int]]:
+    """Splits an image into overlapping grid tiles for high-resolution inspection."""
     width, height = image.size
     step = tile_size - overlap
 
-    tiles = []
-
+    tiles: List[Tuple[Image.Image, int, int]] = []
     y = 0
-
     while y < height:
-
         x = 0
-
         bottom = min(y + tile_size, height)
         top = max(0, bottom - tile_size)
 
         while x < width:
-
             right = min(x + tile_size, width)
             left = max(0, right - tile_size)
 
             crop = image.crop((left, top, right, bottom))
-
             tiles.append((crop, left, top))
 
             if right >= width:
                 break
-
             x += step
 
         if bottom >= height:
             break
-
         y += step
 
     return tiles
 
 
 # ------------------------------------------------
-# Main detector
+# Main Object Detection Entrypoint
 # ------------------------------------------------
-
 def detect_objects(
     image: Image.Image,
     prompt: str,
-):
+    preset: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Main Grounding DINO detection function:
+    1. Sanitizes prompt to short, concrete observable classes
+    2. Runs tiled inference with class-specific thresholds
+    3. Merges and removes duplicate overlapping boxes (NMS)
+    4. Formats each detection into the clean unified output schema
+    """
     image = image.convert("RGB")
-
     full_width, full_height = image.size
 
-    print(
-        f"\nImage size: {full_width}x{full_height}"
-    )
-    print(
-        f"Prompt    : {prompt!r}"
-    )
-    print(
-        f"Thresholds: box={BOX_THRESHOLD}, "
-        f"text={TEXT_THRESHOLD}, "
-        f"min_conf={MIN_CONFIDENCE}"
+    # 1. Sanitize prompt (translate abstract queries or presets to observable classes)
+    clean_prompt = sanitize_prompt(prompt, preset=preset)
+    logger.info(
+        f"[Grounding DINO] Processing Image ({full_width}x{full_height}) | "
+        f"Raw query: {prompt!r} | Preset: {preset!r} | Prompt: {clean_prompt!r}"
     )
 
-    tiles = create_tiles(
-        image,
-        tile_size=512,
-        overlap=96,
-    )
+    # 2. Tile image if larger than tile size
+    if full_width <= TILE_SIZE and full_height <= TILE_SIZE:
+        raw_detections = run_model_on_image(image, clean_prompt)
+        all_detections = raw_detections
+    else:
+        tiles = create_tiles(image, tile_size=TILE_SIZE, overlap=TILE_OVERLAP)
+        logger.info(f"[Grounding DINO] Image split into {len(tiles)} tiles for detection.")
+        all_detections = []
 
-    print(f"Tiles     : {len(tiles)}")
+        for idx, (tile, offset_x, offset_y) in enumerate(tiles):
+            tile_detections = run_model_on_image(tile, clean_prompt)
+            for det in tile_detections:
+                x1, y1, x2, y2 = det["box"]
+                det["box"] = [
+                    x1 + offset_x,
+                    y1 + offset_y,
+                    x2 + offset_x,
+                    y2 + offset_y,
+                ]
+                all_detections.append(det)
 
-    all_detections = []
+    logger.info(f"[Grounding DINO] Raw candidate detections collected: {len(all_detections)}")
 
-    for index, (
-        tile,
-        offset_x,
-        offset_y,
-    ) in enumerate(tiles):
-
-        print(
-            f"\n[Tile {index + 1}/{len(tiles)}] "
-            f"offset=({offset_x},{offset_y})"
-        )
-
-        tile_detections = run_model_on_image(
-            tile,
-            prompt,
-            threshold=BOX_THRESHOLD,
-            text_threshold=TEXT_THRESHOLD,
-        )
-
-        print(
-            f"  Raw detections: {len(tile_detections)}"
-        )
-
-        for detection in tile_detections:
-
-            x1, y1, x2, y2 = detection["box"]
-
-            detection["box"] = [
-                x1 + offset_x,
-                y1 + offset_y,
-                x2 + offset_x,
-                y2 + offset_y,
-            ]
-
-            all_detections.append(detection)
-
-    print(
-        f"\nBefore NMS: {len(all_detections)}"
-    )
-
-    final_detections = remove_duplicates(
-        all_detections,
+    # 3. Format and deduplicate via NMS
+    final_detections = filter_and_format_detections(
+        raw_detections=all_detections,
+        width=full_width,
+        height=full_height,
         iou_threshold=NMS_IOU_THRESHOLD,
     )
 
-    print(
-        f"After NMS : {len(final_detections)}"
-    )
-
+    logger.info(f"[Grounding DINO] Final verified detections after NMS: {len(final_detections)}")
     return final_detections

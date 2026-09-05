@@ -162,6 +162,7 @@ async def list_providers():
 async def detect(
     file: UploadFile = File(...),
     prompt: str = Form(...),
+    preset: Optional[str] = Form(None),
 ):
     try:
         if file is None:
@@ -181,8 +182,8 @@ async def detect(
         except Exception as image_error:
             return JSONResponse(status_code=400, content={"error": "Unable to read the uploaded image.", "details": str(image_error)})
 
-        print(f"\n[SINGLE-IMAGE] Filename: {file.filename} | Prompt: {prompt}")
-        detections = detect_objects(image, prompt.strip())
+        print(f"\n[SINGLE-IMAGE] Filename: {file.filename} | Prompt: {prompt} | Preset: {preset}")
+        detections = detect_objects(image, prompt.strip(), preset=preset)
 
         if detections is None:
             detections = []
@@ -192,6 +193,7 @@ async def detect(
             "width": image.width,
             "height": image.height,
             "prompt": prompt.strip(),
+            "preset": preset,
             "detections": detections,
         }
 

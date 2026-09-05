@@ -13,6 +13,7 @@ export async function POST(req: NextRequest) {
 
     imageDataUrl = body.imageDataUrl;
     prompt = body.prompt;
+    const preset = body.preset;
 
     if (!imageDataUrl) {
       return NextResponse.json(
@@ -49,6 +50,9 @@ export async function POST(req: NextRequest) {
         const formData = new FormData();
         formData.append("file", blob, "satellite-image.jpg");
         formData.append("prompt", prompt);
+        if (preset) {
+          formData.append("preset", preset);
+        }
 
         const controller = new AbortController();
         const timeoutMs = aiServiceUrl.includes("127.0.0.1") || aiServiceUrl.includes("localhost") ? 3500 : 30000;
@@ -71,7 +75,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 2. Cloud-native fallback detection with Gemini Vision
-    const cloudDetection = await runCloudDetection(imageDataUrl, prompt);
+    const cloudDetection = await runCloudDetection(imageDataUrl, prompt, preset);
     return NextResponse.json(cloudDetection);
   } catch (error) {
     console.error("Detection API error:", error);

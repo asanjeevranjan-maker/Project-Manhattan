@@ -15,6 +15,12 @@ from services.vision.base_provider import (
     VisionProviderAuthError,
     VisionProviderRateLimitError,
 )
+from services.detection.vocabulary import (
+    SATELLITE_CLASSES,
+    ANALYSIS_PRESETS,
+    DEFAULT_CLASS_THRESHOLDS,
+    sanitize_prompt,
+)
 
 _load_env_if_missing()
 
@@ -75,6 +81,39 @@ def health_check():
         "service": "SatQuery AI API",
         "version": "2.1.0",
         "providers_available": vision_service.get_available_providers(),
+    }
+
+
+@app.get("/classes")
+@app.get("/api/classes")
+def get_classes():
+    """Returns the catalog of 16 observable satellite object classes and their aliases."""
+    return {"classes": SATELLITE_CLASSES}
+
+
+@app.get("/presets")
+@app.get("/api/presets")
+def get_presets():
+    """Returns analysis-specific class presets (general, urban, water, agriculture, infrastructure, disaster, maritime)."""
+    return {"presets": ANALYSIS_PRESETS}
+
+
+@app.get("/thresholds")
+@app.get("/api/thresholds")
+def get_thresholds():
+    """Returns class-specific configurable score and geometry thresholds."""
+    return {
+        "thresholds": {
+            k: {
+                "box_threshold": v.box_threshold,
+                "text_threshold": v.text_threshold,
+                "min_score": v.min_score,
+                "max_area_ratio": v.max_area_ratio,
+                "min_aspect": v.min_aspect,
+                "max_aspect": v.max_aspect,
+            }
+            for k, v in DEFAULT_CLASS_THRESHOLDS.items()
+        }
     }
 
 
