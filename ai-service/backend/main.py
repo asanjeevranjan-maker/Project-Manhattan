@@ -163,6 +163,7 @@ async def detect(
     file: UploadFile = File(...),
     prompt: str = Form(...),
     preset: Optional[str] = Form(None),
+    use_tiles: Optional[bool] = Form(None),
 ):
     try:
         if file is None:
@@ -182,8 +183,14 @@ async def detect(
         except Exception as image_error:
             return JSONResponse(status_code=400, content={"error": "Unable to read the uploaded image.", "details": str(image_error)})
 
-        print(f"\n[SINGLE-IMAGE] Filename: {file.filename} | Prompt: {prompt} | Preset: {preset}")
-        detections = detect_objects(image, prompt.strip(), preset=preset)
+        print(f"\n[SINGLE-IMAGE] Filename: {file.filename} | Prompt: {prompt} | Preset: {preset} | use_tiles: {use_tiles}")
+        detections, tiling_meta = detect_objects(
+            image=image,
+            prompt=prompt.strip(),
+            preset=preset,
+            use_tiles=use_tiles,
+            return_tiling_metadata=True,
+        )
 
         if detections is None:
             detections = []
@@ -195,6 +202,7 @@ async def detect(
             "prompt": prompt.strip(),
             "preset": preset,
             "detections": detections,
+            "tiling": tiling_meta,
         }
 
         return JSONResponse(status_code=200, content=result)

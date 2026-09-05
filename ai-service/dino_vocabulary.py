@@ -29,9 +29,23 @@ try:
         remove_duplicate_detections,
         box_iou,
     )
+    from services.detection.tiler import (
+        TILE_SIZE,
+        TILE_OVERLAP,
+        ENABLE_TILING,
+        MIN_IMAGE_SIZE_FOR_TILING,
+        MAX_TILES,
+        should_tile_image,
+        calculate_tile_grid,
+        iter_tiles,
+        generate_tiles,
+        tile_bbox_to_global,
+        format_tile_metadata,
+    )
 except ImportError:
     # Direct relative import fallback
     from services.detection.vocabulary import *  # type: ignore
+    from services.detection.tiler import *  # type: ignore
 
 __all__ = [
     "SATELLITE_CLASSES",
@@ -48,4 +62,16 @@ __all__ = [
     "filter_and_format_detections",
     "remove_duplicate_detections",
     "box_iou",
+    "TILE_SIZE",
+    "TILE_OVERLAP",
+    "ENABLE_TILING",
+    "MIN_IMAGE_SIZE_FOR_TILING",
+    "MAX_TILES",
+    "should_tile_image",
+    "calculate_tile_grid",
+    "iter_tiles",
+    "generate_tiles",
+    "tile_bbox_to_global",
+    "format_tile_metadata",
 ]
+

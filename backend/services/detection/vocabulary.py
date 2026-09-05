@@ -613,3 +613,4 @@ def filter_and_format_detections(
         d["id"] = f"det-{idx + 1}"
 
     return deduped
+

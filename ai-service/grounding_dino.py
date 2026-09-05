@@ -34,6 +34,17 @@ from dino_vocabulary import (
     filter_and_format_detections,
     remove_duplicate_detections,
     box_iou,
+    TILE_SIZE,
+    TILE_OVERLAP,
+    ENABLE_TILING,
+    MIN_IMAGE_SIZE_FOR_TILING,
+    MAX_TILES,
+    should_tile_image,
+    calculate_tile_grid,
+    iter_tiles,
+    generate_tiles,
+    tile_bbox_to_global,
+    format_tile_metadata,
 )
 
 logger = logging.getLogger("satquery.grounding_dino")
@@ -204,56 +215,26 @@ def run_model_on_image(
 
 
 # ------------------------------------------------
-# Overlapping Tile Generation
-# ------------------------------------------------
-def create_tiles(
-    image: Image.Image,
-    tile_size: int = TILE_SIZE,
-    overlap: int = TILE_OVERLAP,
-) -> List[Tuple[Image.Image, int, int]]:
-    """Splits an image into overlapping grid tiles for high-resolution inspection."""
-    width, height = image.size
-    step = tile_size - overlap
-
-    tiles: List[Tuple[Image.Image, int, int]] = []
-    y = 0
-    while y < height:
-        x = 0
-        bottom = min(y + tile_size, height)
-        top = max(0, bottom - tile_size)
-
-        while x < width:
-            right = min(x + tile_size, width)
-            left = max(0, right - tile_size)
-
-            crop = image.crop((left, top, right, bottom))
-            tiles.append((crop, left, top))
-
-            if right >= width:
-                break
-            x += step
-
-        if bottom >= height:
-            break
-        y += step
-
-    return tiles
-
-
-# ------------------------------------------------
-# Main Object Detection Entrypoint
+# Main Object Detection Entrypoint with Intelligent Tiling
 # ------------------------------------------------
 def detect_objects(
     image: Image.Image,
     prompt: str,
     preset: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+    use_tiles: Optional[bool] = None,
+    tile_size: int = TILE_SIZE,
+    overlap: float = TILE_OVERLAP,
+    max_tiles: int = MAX_TILES,
+    return_tiling_metadata: bool = False,
+):
     """
     Main Grounding DINO detection function:
     1. Sanitizes prompt to short, concrete observable classes
-    2. Runs tiled inference with class-specific thresholds
-    3. Merges and removes duplicate overlapping boxes (NMS)
-    4. Formats each detection into the clean unified output schema
+    2. Dynamically determines whether to tile based on image dimensions and user configuration
+    3. Runs inference on memory-safe tile streams without full-image duplication
+    4. Translates tile-local bounding boxes directly into original image coordinates
+    5. Deduplicates boundary overlaps via class-specific NMS
+    6. Formats clean detections with qualitative confidence levels and center locations
     """
     image = image.convert("RGB")
     full_width, full_height = image.size
@@ -262,31 +243,77 @@ def detect_objects(
     clean_prompt = sanitize_prompt(prompt, preset=preset)
     logger.info(
         f"[Grounding DINO] Processing Image ({full_width}x{full_height}) | "
-        f"Raw query: {prompt!r} | Preset: {preset!r} | Prompt: {clean_prompt!r}"
+        f"Raw query: {prompt!r} | Preset: {preset!r} | Sanitized: {clean_prompt!r}"
     )
 
-    # 2. Tile image if larger than tile size
-    if full_width <= TILE_SIZE and full_height <= TILE_SIZE:
-        raw_detections = run_model_on_image(image, clean_prompt)
-        all_detections = raw_detections
-    else:
-        tiles = create_tiles(image, tile_size=TILE_SIZE, overlap=TILE_OVERLAP)
-        logger.info(f"[Grounding DINO] Image split into {len(tiles)} tiles for detection.")
-        all_detections = []
+    # 2. Determine tiling activation
+    tiling_requested = ENABLE_TILING if use_tiles is None else bool(use_tiles)
+    will_tile = tiling_requested and should_tile_image(
+        image=image,
+        min_size=MIN_IMAGE_SIZE_FOR_TILING,
+        enable_tiling=tiling_requested,
+    )
 
-        for idx, (tile, offset_x, offset_y) in enumerate(tiles):
-            tile_detections = run_model_on_image(tile, clean_prompt)
-            for det in tile_detections:
-                x1, y1, x2, y2 = det["box"]
-                det["box"] = [
-                    x1 + offset_x,
-                    y1 + offset_y,
-                    x2 + offset_x,
-                    y2 + offset_y,
-                ]
+    all_detections = []
+    tiles_debug_info = []
+
+    if will_tile:
+        logger.info(
+            f"[Grounding DINO] Tiling ACTIVATED for {full_width}x{full_height} image "
+            f"(tile_size={tile_size}px, overlap={int(overlap*100)}%, max_tiles={max_tiles})."
+        )
+        for tile_dict in iter_tiles(
+            image=image,
+            tile_size=tile_size,
+            overlap=overlap,
+            max_tiles=max_tiles,
+            min_image_size=MIN_IMAGE_SIZE_FOR_TILING,
+        ):
+            t_crop = tile_dict["image"]
+            ox = tile_dict["x_offset"]
+            oy = tile_dict["y_offset"]
+            t_id = tile_dict["tile_id"]
+
+            raw_tile_dets = run_model_on_image(t_crop, clean_prompt)
+            tiles_debug_info.append({
+                "tile_id": t_id,
+                "x_offset": ox,
+                "y_offset": oy,
+                "width": tile_dict["width"],
+                "height": tile_dict["height"],
+                "detections_count": len(raw_tile_dets),
+            })
+
+            # Convert local tile bounding boxes to global coordinates
+            for det in raw_tile_dets:
+                global_box = tile_bbox_to_global(
+                    bbox=det["box"],
+                    x_offset=ox,
+                    y_offset=oy,
+                    clip_max_w=full_width,
+                    clip_max_h=full_height,
+                )
+                det["box"] = global_box
                 all_detections.append(det)
+    else:
+        logger.info(
+            f"[Grounding DINO] Direct single-tile inference for {full_width}x{full_height} image "
+            f"(tiling bypassed or below min size {MIN_IMAGE_SIZE_FOR_TILING}px)."
+        )
+        raw_dets = run_model_on_image(image, clean_prompt)
+        tiles_debug_info.append({
+            "tile_id": "tile_0_0",
+            "x_offset": 0,
+            "y_offset": 0,
+            "width": full_width,
+            "height": full_height,
+            "detections_count": len(raw_dets),
+        })
+        all_detections = raw_dets
 
-    logger.info(f"[Grounding DINO] Raw candidate detections collected: {len(all_detections)}")
+    logger.info(
+        f"[Grounding DINO] Total raw candidates across tiles: {len(all_detections)}"
+    )
 
     # 3. Format and deduplicate via NMS
     final_detections = filter_and_format_detections(
@@ -296,5 +323,20 @@ def detect_objects(
         iou_threshold=NMS_IOU_THRESHOLD,
     )
 
-    logger.info(f"[Grounding DINO] Final verified detections after NMS: {len(final_detections)}")
+    logger.info(
+        f"[Grounding DINO] Final verified detections after NMS: {len(final_detections)}"
+    )
+
+    tiling_metadata = format_tile_metadata(
+        tiles_info=tiles_debug_info,
+        enabled=will_tile,
+        full_width=full_width,
+        full_height=full_height,
+        tile_size=tile_size,
+        overlap=overlap,
+    )
+
+    if return_tiling_metadata:
+        return final_detections, tiling_metadata
+
     return final_detections
