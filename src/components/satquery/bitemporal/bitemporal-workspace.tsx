@@ -6,11 +6,12 @@ import type {
   TemporalComparisonResult,
   TemporalChangeItem,
 } from '@/lib/types';
-import { AOIMap, PRESET_LOCATIONS } from './aoi-map';
+import { AOIMap, PRESET_LOCATIONS, computeAoiFromSpan } from './aoi-map';
 import { ChangeMap } from './change-map';
 import { ImageSlider } from './image-slider';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Slider } from '@/components/ui/slider';
 import { useToast } from '@/hooks/use-toast';
 import { fileToDataUrl } from '@/lib/client-utils';
 import {
@@ -29,6 +30,8 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Minus,
+  Plus,
+  SlidersHorizontal,
   Maximize2,
   Clock,
   ShieldCheck,
@@ -350,7 +353,7 @@ export function BiTemporalWorkspace() {
         {/* Left Column: Location & AOI Selection (or Manual File T1) */}
         <div className="lg:col-span-7 space-y-4">
           {bitemporalMode === 'latest' ? (
-            <div className="rounded-xl border bg-card p-4 space-y-3">
+            <div className="rounded-xl border bg-card p-4 space-y-3.5">
               <div className="flex items-center justify-between">
                 <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
                   <MapPin className="size-3.5 text-primary" /> 1. Area of Interest (AOI)
@@ -377,6 +380,95 @@ export function BiTemporalWorkspace() {
                 </Button>
               </form>
 
+              {/* Variable AOI Span Controller */}
+              {(() => {
+                const centerLat = (aoi.north + aoi.south) / 2;
+                const centerLng = (aoi.east + aoi.west) / 2;
+                const latSpan = Math.abs(aoi.north - aoi.south);
+                const lonSpan = Math.abs(aoi.east - aoi.west);
+                const cosLat = Math.cos((centerLat * Math.PI) / 180);
+                const currentSpanKm = Math.max(0.5, Math.round(Math.max(latSpan * 111, lonSpan * 111 * (Math.abs(cosLat) > 0.05 ? cosLat : 1.0)) * 10) / 10);
+
+                const handleSetSpan = (targetKm: number) => {
+                  const updated = computeAoiFromSpan(centerLat, centerLng, targetKm);
+                  setAoi(updated);
+                };
+
+                return (
+                  <div className="rounded-lg border bg-muted/25 p-2.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        <SlidersHorizontal className="size-3.5 text-primary" />
+                        <span className="text-xs font-semibold text-foreground">Variable AOI Span:</span>
+                        <span className="font-mono text-xs font-bold text-primary">~{currentSpanKm} km</span>
+                      </div>
+                      <span className="text-[11px] text-muted-foreground">
+                        Footprint: ~{(currentSpanKm * currentSpanKm).toFixed(1)} km²
+                      </span>
+                    </div>
+
+                    {/* Slider with Stepper Buttons */}
+                    <div className="flex items-center gap-2.5">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="size-7 rounded-md shrink-0"
+                        onClick={() => handleSetSpan(Math.max(0.5, currentSpanKm - 1))}
+                        title="Decrease span by 1 km"
+                      >
+                        <Minus className="size-3" />
+                      </Button>
+                      <Slider
+                        value={[currentSpanKm]}
+                        min={0.5}
+                        max={30}
+                        step={0.5}
+                        onValueChange={([val]) => handleSetSpan(val)}
+                        className="flex-1 py-1"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="size-7 rounded-md shrink-0"
+                        onClick={() => handleSetSpan(Math.min(50, currentSpanKm + 1))}
+                        title="Increase span by 1 km"
+                      >
+                        <Plus className="size-3" />
+                      </Button>
+                    </div>
+
+                    {/* Quick Span Chips */}
+                    <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                      <span className="text-[10px] uppercase font-semibold text-muted-foreground mr-1">Quick Spans:</span>
+                      {[
+                        { label: '1 km', desc: 'Facility', km: 1 },
+                        { label: '2 km', desc: 'Terminal', km: 2 },
+                        { label: '4 km', desc: 'District', km: 4 },
+                        { label: '8 km', desc: 'Ward', km: 8 },
+                        { label: '15 km', desc: 'Metro', km: 15 },
+                        { label: '25 km', desc: 'Region', km: 25 },
+                      ].map((item) => (
+                        <button
+                          key={item.km}
+                          type="button"
+                          onClick={() => handleSetSpan(item.km)}
+                          className={`rounded-md border px-2 py-0.5 text-[11px] font-medium transition-all ${
+                            Math.abs(currentSpanKm - item.km) <= (item.km <= 2 ? 0.4 : 1)
+                              ? 'border-primary bg-primary/15 text-primary font-semibold shadow-xs'
+                              : 'border-border/60 bg-background/60 text-muted-foreground hover:border-primary/40 hover:bg-muted hover:text-foreground'
+                          }`}
+                        >
+                          <span className="font-semibold">{item.label}</span>{' '}
+                          <span className="text-[9px] opacity-75">({item.desc})</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Interactive AOI Map */}
               <AOIMap
                 aoi={aoi}
@@ -392,23 +484,65 @@ export function BiTemporalWorkspace() {
                 className="h-[280px]"
               />
 
-              {/* Coordinates details */}
-              <div className="grid grid-cols-4 gap-2 text-[11px]">
-                <div className="rounded border bg-muted/30 p-1 text-center">
-                  <span className="text-muted-foreground text-[10px]">North</span>
-                  <p className="font-mono font-semibold">{aoi.north}°</p>
+              {/* Coordinates details with editable inputs */}
+              <div className="space-y-1 pt-1">
+                <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                  <span className="font-medium text-foreground">Bounding Box Coordinates (Degrees):</span>
+                  <span>Click map to reposition center</span>
                 </div>
-                <div className="rounded border bg-muted/30 p-1 text-center">
-                  <span className="text-muted-foreground text-[10px]">South</span>
-                  <p className="font-mono font-semibold">{aoi.south}°</p>
-                </div>
-                <div className="rounded border bg-muted/30 p-1 text-center">
-                  <span className="text-muted-foreground text-[10px]">East</span>
-                  <p className="font-mono font-semibold">{aoi.east}°</p>
-                </div>
-                <div className="rounded border bg-muted/30 p-1 text-center">
-                  <span className="text-muted-foreground text-[10px]">West</span>
-                  <p className="font-mono font-semibold">{aoi.west}°</p>
+                <div className="grid grid-cols-4 gap-2 text-[11px]">
+                  <div className="rounded border bg-muted/20 p-1.5 space-y-1">
+                    <span className="text-muted-foreground text-[10px] block font-medium">North (Lat Max)</span>
+                    <Input
+                      type="number"
+                      step="0.001"
+                      value={aoi.north}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        if (!isNaN(val)) setAoi((prev) => ({ ...prev, north: val }));
+                      }}
+                      className="h-7 px-1.5 text-xs font-mono font-semibold bg-background"
+                    />
+                  </div>
+                  <div className="rounded border bg-muted/20 p-1.5 space-y-1">
+                    <span className="text-muted-foreground text-[10px] block font-medium">South (Lat Min)</span>
+                    <Input
+                      type="number"
+                      step="0.001"
+                      value={aoi.south}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        if (!isNaN(val)) setAoi((prev) => ({ ...prev, south: val }));
+                      }}
+                      className="h-7 px-1.5 text-xs font-mono font-semibold bg-background"
+                    />
+                  </div>
+                  <div className="rounded border bg-muted/20 p-1.5 space-y-1">
+                    <span className="text-muted-foreground text-[10px] block font-medium">East (Lon Max)</span>
+                    <Input
+                      type="number"
+                      step="0.001"
+                      value={aoi.east}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        if (!isNaN(val)) setAoi((prev) => ({ ...prev, east: val }));
+                      }}
+                      className="h-7 px-1.5 text-xs font-mono font-semibold bg-background"
+                    />
+                  </div>
+                  <div className="rounded border bg-muted/20 p-1.5 space-y-1">
+                    <span className="text-muted-foreground text-[10px] block font-medium">West (Lon Min)</span>
+                    <Input
+                      type="number"
+                      step="0.001"
+                      value={aoi.west}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        if (!isNaN(val)) setAoi((prev) => ({ ...prev, west: val }));
+                      }}
+                      className="h-7 px-1.5 text-xs font-mono font-semibold bg-background"
+                    />
+                  </div>
                 </div>
               </div>
             </div>

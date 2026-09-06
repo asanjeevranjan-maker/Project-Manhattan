@@ -69,4 +69,6 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.pytest_cache/
+outputs/
 ai-service/cache/satellite/

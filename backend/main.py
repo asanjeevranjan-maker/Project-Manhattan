@@ -44,6 +44,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+try:
+    from services.geospatial import RASTERIO_AVAILABLE
+    from services.geospatial.router import router as geospatial_router
+    app.include_router(geospatial_router)
+    GEOSPATIAL_ROUTER_AVAILABLE = True
+except Exception as _geo_err:
+    logger.warning(f"Could not mount geospatial router: {_geo_err}")
+    RASTERIO_AVAILABLE = False
+    GEOSPATIAL_ROUTER_AVAILABLE = False
+
 
 class AnalyzeRequest(BaseModel):
     user_query: Optional[str] = Field(None, description="Analytical query for satellite imagery")
@@ -95,6 +105,7 @@ def read_root():
         "service": "SatQuery AI API",
         "version": "2.1.0",
         "vision_providers": vision_service.get_available_providers(),
+        "geospatial_available": RASTERIO_AVAILABLE,
         "docs": "/docs",
     }
 
@@ -106,6 +117,7 @@ def health_check():
         "service": "SatQuery AI API",
         "version": "2.1.0",
         "providers_available": vision_service.get_available_providers(),
+        "geospatial_available": RASTERIO_AVAILABLE,
     }
 
 

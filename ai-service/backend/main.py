@@ -75,6 +75,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+try:
+    from services.geospatial import RASTERIO_AVAILABLE
+    from services.geospatial.router import router as geospatial_router
+    app.include_router(geospatial_router)
+    GEOSPATIAL_AVAILABLE = RASTERIO_AVAILABLE
+except Exception as _geo_err:
+    print(f"[Warning] Failed to import geospatial service in ai-service: {_geo_err}")
+    GEOSPATIAL_AVAILABLE = False
+
 
 # =========================================================
 # HELPERS

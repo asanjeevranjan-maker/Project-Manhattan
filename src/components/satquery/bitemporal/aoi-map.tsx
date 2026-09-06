@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AOIBounds } from '@/lib/types';
 import { Button } from '@/components/ui/button';
-import { MapPin, ZoomIn, ZoomOut, Compass } from 'lucide-react';
+import { MapPin, ZoomIn, ZoomOut, Compass, Minus, Plus, Maximize2 } from 'lucide-react';
 
 interface Props {
   aoi: AOIBounds;
@@ -56,11 +56,34 @@ export const PRESET_LOCATIONS: Array<{
   },
 ];
 
+/**
+ * Calculates new AOIBounds for a given center coordinate and span in kilometers,
+ * correctly scaling longitude by latitude cosine.
+ */
+export function computeAoiFromSpan(centerLat: number, centerLng: number, spanKm: number): AOIBounds {
+  const km = Math.max(0.5, Math.min(60, spanKm));
+  const latSpanDeg = km / 111;
+  const cosLat = Math.cos((centerLat * Math.PI) / 180);
+  const lonScale = Math.abs(cosLat) > 0.05 ? cosLat : 1.0;
+  const lonSpanDeg = km / (111 * lonScale);
+
+  return {
+    north: parseFloat((centerLat + latSpanDeg / 2).toFixed(4)),
+    south: parseFloat((centerLat - latSpanDeg / 2).toFixed(4)),
+    east: parseFloat((centerLng + lonSpanDeg / 2).toFixed(4)),
+    west: parseFloat((centerLng - lonSpanDeg / 2).toFixed(4)),
+  };
+}
+
 export function AOIMap({ aoi, onChangeAoi, onSelectPreset, className }: Props) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
   const rectangleLayerRef = useRef<any>(null);
   const [mapReady, setMapReady] = useState(false);
+
+  // Keep a ref to the latest aoi to prevent stale closures in leaflet event handlers
+  const aoiRef = useRef(aoi);
+  aoiRef.current = aoi;
 
   // Initialize Leaflet map
   useEffect(() => {
@@ -73,8 +96,9 @@ export function AOIMap({ aoi, onChangeAoi, onSelectPreset, className }: Props) {
       try {
         const L = (await import('leaflet')).default;
 
-        const centerLat = (aoi.north + aoi.south) / 2;
-        const centerLng = (aoi.east + aoi.west) / 2;
+        const currentAoi = aoiRef.current;
+        const centerLat = (currentAoi.north + currentAoi.south) / 2;
+        const centerLng = (currentAoi.east + currentAoi.west) / 2;
 
         const map = L.map(mapContainerRef.current, {
           center: [centerLat, centerLng],
@@ -97,8 +121,8 @@ export function AOIMap({ aoi, onChangeAoi, onSelectPreset, className }: Props) {
 
         // AOI Bounding Box rectangle
         const bounds = L.latLngBounds(
-          [aoi.south, aoi.west],
-          [aoi.north, aoi.east]
+          [currentAoi.south, currentAoi.west],
+          [currentAoi.north, currentAoi.east]
         );
 
         const rect = L.rectangle(bounds, {
@@ -112,12 +136,12 @@ export function AOIMap({ aoi, onChangeAoi, onSelectPreset, className }: Props) {
         rectangleLayerRef.current = rect;
         mapInstanceRef.current = map;
 
-        // Click to center AOI
+        // Click to center AOI at clicked point while maintaining current span
         map.on('click', (e: any) => {
           const lat = e.latlng.lat;
           const lng = e.latlng.lng;
-          const latSpan = Math.abs(aoi.north - aoi.south) / 2;
-          const lngSpan = Math.abs(aoi.east - aoi.west) / 2;
+          const latSpan = Math.abs(aoiRef.current.north - aoiRef.current.south) / 2;
+          const lngSpan = Math.abs(aoiRef.current.east - aoiRef.current.west) / 2;
 
           onChangeAoi({
             north: parseFloat((lat + latSpan).toFixed(4)),
@@ -162,6 +186,7 @@ export function AOIMap({ aoi, onChangeAoi, onSelectPreset, className }: Props) {
           weight: 2,
           fillColor: '#10b981',
           fillOpacity: 0.18,
+          dashArray: '4, 4',
         }).addTo(mapInstanceRef.current);
       }
 
@@ -171,18 +196,73 @@ export function AOIMap({ aoi, onChangeAoi, onSelectPreset, className }: Props) {
 
   const latSpan = Math.abs(aoi.north - aoi.south);
   const lonSpan = Math.abs(aoi.east - aoi.west);
-  const approxKm = Math.round(Math.max(latSpan, lonSpan) * 111);
+  const centerLat = (aoi.north + aoi.south) / 2;
+  const centerLng = (aoi.east + aoi.west) / 2;
+  const cosLat = Math.cos((centerLat * Math.PI) / 180);
+  const approxKm = Math.max(0.5, Math.round(Math.max(latSpan * 111, lonSpan * 111 * (Math.abs(cosLat) > 0.05 ? cosLat : 1.0))));
+
+  const handleAdjustSpan = (targetKm: number) => {
+    const newAoi = computeAoiFromSpan(centerLat, centerLng, targetKm);
+    onChangeAoi(newAoi);
+  };
 
   return (
     <div className={`relative flex flex-col overflow-hidden rounded-xl border bg-card ${className || 'h-[340px]'}`}>
       {/* Map container */}
       <div ref={mapContainerRef} className="h-full w-full bg-muted/40" />
 
-      {/* Floating overlay badge */}
-      <div className="pointer-events-none absolute left-3 top-3 z-[400] flex items-center gap-2 rounded-lg border bg-background/90 px-2.5 py-1.5 text-xs shadow-md backdrop-blur">
-        <span className="size-2 rounded-full bg-emerald-500 glow-pulse" />
-        <span className="font-semibold">Area of Interest</span>
-        <span className="text-muted-foreground">· ~{approxKm} km span</span>
+      {/* Floating interactive overlay badge with variable span controls */}
+      <div className="absolute left-3 top-3 z-[400] flex flex-col gap-1.5 rounded-lg border bg-background/95 p-2 text-xs shadow-md backdrop-blur">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="size-2 rounded-full bg-emerald-500 glow-pulse" />
+            <span className="font-semibold text-foreground">Area of Interest</span>
+          </div>
+          <div className="flex items-center gap-1 rounded bg-muted/80 px-1.5 py-0.5 font-mono text-[11px] font-bold text-primary">
+            ~{approxKm} km span
+          </div>
+        </div>
+
+        {/* Quick Stepper & Chips for Variable Span */}
+        <div className="flex items-center gap-1 border-t border-border/50 pt-1.5">
+          <span className="text-[10px] text-muted-foreground mr-0.5">Size:</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-5 rounded hover:bg-muted"
+            onClick={() => handleAdjustSpan(Math.max(1, approxKm - 1))}
+            title="Decrease span by 1 km"
+          >
+            <Minus className="size-2.5" />
+          </Button>
+
+          {[1, 2, 4, 8, 15, 25].map((km) => (
+            <button
+              key={km}
+              type="button"
+              onClick={() => handleAdjustSpan(km)}
+              className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-all ${
+                Math.abs(approxKm - km) <= (km <= 2 ? 0.4 : 1)
+                  ? 'bg-primary text-primary-foreground font-semibold shadow-xs'
+                  : 'bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground'
+              }`}
+            >
+              {km}k
+            </button>
+          ))}
+
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-5 rounded hover:bg-muted"
+            onClick={() => handleAdjustSpan(Math.min(50, approxKm + 1))}
+            title="Increase span by 1 km"
+          >
+            <Plus className="size-2.5" />
+          </Button>
+        </div>
       </div>
 
       {/* Zoom controls */}
@@ -229,4 +309,3 @@ export function AOIMap({ aoi, onChangeAoi, onSelectPreset, className }: Props) {
     </div>
   );
 }
-
