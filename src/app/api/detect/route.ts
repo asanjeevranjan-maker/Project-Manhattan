@@ -3,6 +3,7 @@ import { runCloudDetection } from "@/lib/cloud-temporal";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   let imageDataUrl = "";
@@ -29,8 +30,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Try local/dedicated Python AI service if reachable
-    const aiServiceUrl = process.env.AI_SERVICE_URL || "http://127.0.0.1:8000";
+    // 1. Try local/dedicated Python AI service if configured or running
+    const aiServiceUrl = process.env.AI_SERVICE_URL || (process.env.VERCEL ? undefined : "http://127.0.0.1:8000");
     if (aiServiceUrl) {
       try {
         let blob: Blob;

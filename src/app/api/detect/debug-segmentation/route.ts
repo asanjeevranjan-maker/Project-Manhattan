@@ -2,10 +2,20 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   try {
-    const aiServiceUrl = process.env.AI_SERVICE_URL || "http://127.0.0.1:8000";
+    const aiServiceUrl = process.env.AI_SERVICE_URL || (process.env.VERCEL ? undefined : "http://127.0.0.1:8000");
+    if (!aiServiceUrl) {
+      return NextResponse.json(
+        {
+          error: "Debug segmentation requires a dedicated AI service endpoint",
+          details: "AI_SERVICE_URL is not configured in this environment.",
+        },
+        { status: 503 }
+      );
+    }
     const contentType = req.headers.get("content-type") || "";
 
     let formData: FormData;
