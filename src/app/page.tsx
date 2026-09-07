@@ -11,19 +11,21 @@ type View = 'landing' | 'workspace';
 
 function readInitialView(): View {
   if (typeof window === 'undefined') return 'landing';
-  return window.location.hash === '#workspace' || window.location.hash === '#bitemporal'
+  return window.location.hash === '#workspace' || window.location.hash === '#bitemporal' || window.location.hash === '#fusion'
     ? 'workspace'
     : 'landing';
 }
 
-function readInitialTab(): 'single' | 'bitemporal' {
+function readInitialTab(): 'single' | 'bitemporal' | 'fusion' {
   if (typeof window === 'undefined') return 'single';
-  return window.location.hash === '#bitemporal' ? 'bitemporal' : 'single';
+  if (window.location.hash === '#bitemporal') return 'bitemporal';
+  if (window.location.hash === '#fusion') return 'fusion';
+  return 'single';
 }
 
 export default function Home() {
   const [view, setView] = useState<View>(readInitialView);
-  const [activeTab, setActiveTab] = useState<'single' | 'bitemporal'>(readInitialTab);
+  const [activeTab, setActiveTab] = useState<'single' | 'bitemporal' | 'fusion'>(readInitialTab);
   const activeImage = useSatQueryStore((s) => s.activeImage);
 
   useEffect(() => {
@@ -32,6 +34,9 @@ export default function Home() {
       if (h === '#bitemporal') {
         setView('workspace');
         setActiveTab('bitemporal');
+      } else if (h === '#fusion') {
+        setView('workspace');
+        setActiveTab('fusion');
       } else if (h === '#workspace') {
         setView('workspace');
         setActiveTab('single');
@@ -43,10 +48,10 @@ export default function Home() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  const openWorkspace = useCallback((tab: 'single' | 'bitemporal' = 'single') => {
+  const openWorkspace = useCallback((tab: 'single' | 'bitemporal' | 'fusion' = 'single') => {
     setActiveTab(tab);
     setView('workspace');
-    window.location.hash = tab === 'bitemporal' ? 'bitemporal' : 'workspace';
+    window.location.hash = tab === 'bitemporal' ? 'bitemporal' : tab === 'fusion' ? 'fusion' : 'workspace';
     window.scrollTo({ top: 0, behavior: 'auto' });
   }, []);
 
@@ -65,12 +70,14 @@ export default function Home() {
       <Header
         onLaunch={() => openWorkspace('single')}
         onLaunchBiTemporal={() => openWorkspace('bitemporal')}
+        onLaunchFusion={() => openWorkspace('fusion')}
         hasImage={Boolean(activeImage)}
       />
       <main className="flex-1">
         <Hero
           onLaunch={() => openWorkspace('single')}
           onLaunchBiTemporal={() => openWorkspace('bitemporal')}
+          onLaunchFusion={() => openWorkspace('fusion')}
         />
         <HowItWorks />
         <Features />

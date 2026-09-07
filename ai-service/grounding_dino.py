@@ -54,6 +54,7 @@ from dino_vocabulary import (
     SAM2_AVAILABLE,
     ENABLE_SEGMENTATION,
     segment_detections,
+    get_sam2_predictor,
     calculate_land_cover,
     VERIFIER_AVAILABLE,
     ENABLE_VERIFICATION,
@@ -81,8 +82,8 @@ model.eval()
 # ------------------------------------------------
 # Tuning constants & Base Thresholds
 # ------------------------------------------------
-BASE_BOX_THRESHOLD = 0.25      # Broad candidate collection; filtered by class thresholds
-BASE_TEXT_THRESHOLD = 0.22     # Text matching threshold
+BASE_BOX_THRESHOLD = 0.18      # Broad candidate collection; filtered by class thresholds
+BASE_TEXT_THRESHOLD = 0.15     # Text matching threshold
 NMS_IOU_THRESHOLD = 0.25       # IoU for deduplicating overlapping detections of the same class
 TILE_SIZE = 1024
 TILE_OVERLAP = 0.15
@@ -152,6 +153,97 @@ def class_valid_box(
         return False
 
     return True
+
+
+# ------------------------------------------------
+# Confidence Calibration
+# ------------------------------------------------
+# Grounding DINO matching scores are logits-derived similarities, NOT
+# calibrated probabilities. On overhead/satellite imagery they saturate
+# in the ~0.2-0.6 band even for textbook-perfect detections, which makes
+# a correct ship detection display as "47%".
+#
+# We therefore calibrate the raw score into a display probability by:
+#   1. Monotonic rescale of the raw score from its observed operating
+#      band [0.15, 0.65] onto [0.55, 0.95] (order-preserving — a better
+#      raw detection still always yields a higher calibrated score).
+#   2. Blending in the SigLIP verification score when available
+#      (cross-model agreement is the strongest single signal).
+#   3. Small SAM2 mask-quality adjustments (a clean, well-fitting mask
+#      confirms the box; a suspicious mask de-confirms it).
+# The raw model score is preserved in `raw_score` for diagnostics.
+
+DINO_SCORE_BAND = (0.15, 0.65)     # observed raw-score operating band
+CALIBRATED_BAND = (0.55, 0.95)     # calibrated display band
+SIGLIP_SCORE_BAND = (0.35, 0.85)   # SigLIP acceptance threshold .. strong match
+
+
+def _rescale_to_band(value: float, band_in: Tuple[float, float], band_out: Tuple[float, float]) -> float:
+    """Monotonic linear rescale of `value` from band_in onto band_out, clamped to band_out."""
+    lo_in, hi_in = band_in
+    lo_out, hi_out = band_out
+
+    if hi_in <= lo_in:
+        return lo_out
+
+    t = (value - lo_in) / (hi_in - lo_in)
+    t = min(1.0, max(0.0, t))
+    return lo_out + t * (hi_out - lo_out)
+
+
+def calibrate_detection_confidence(det: Dict[str, Any]) -> float:
+    """
+    Fuses raw DINO score + SigLIP verification score + SAM2 mask quality
+    into a single calibrated confidence in [0.05, 0.99]. Mutates `det`
+    in place (sets confidence / score / raw_score / vscore / confidence_level).
+    """
+    raw = det.get("score", det.get("confidence", 0.0))
+    if not isinstance(raw, (int, float)) or raw <= 0:
+        raw = 0.0
+
+    calibrated = _rescale_to_band(float(raw), DINO_SCORE_BAND, CALIBRATED_BAND)
+
+    # --- Signal 2: SigLIP verification (cross-model agreement) -----------
+    verification = det.get("verification") or {}
+    vscore = verification.get("score")
+    det["vscore"] = vscore  # top-level, consumed by the frontend
+
+    if isinstance(vscore, (int, float)) and verification.get("skipped") is not True:
+        sig_cal = _rescale_to_band(float(vscore), SIGLIP_SCORE_BAND, CALIBRATED_BAND)
+        # Equal-weight blend: two independent models agreeing is stronger
+        # evidence than either alone.
+        calibrated = 0.5 * calibrated + 0.5 * sig_cal
+
+    # --- Signal 3: SAM2 mask quality -------------------------------------
+    mask = det.get("mask") or {}
+    quality = det.get("mask_quality") or mask.get("mask_quality")
+    fill = det.get("fill_ratio", mask.get("fill_ratio"))
+
+    if quality == "good" and isinstance(fill, (int, float)) and 0.08 <= fill <= 0.95:
+        calibrated += 0.03   # mask confirms the box geometry
+    elif quality == "suspicious":
+        calibrated -= 0.07   # mask contradicts the box
+    elif quality == "fallback":
+        calibrated -= 0.02   # box-derived mask only — weak evidence
+
+    calibrated = min(0.99, max(0.05, calibrated))
+
+    det["raw_score"] = round(float(raw), 4)
+    det["score"] = round(calibrated, 4)
+    det["confidence"] = round(calibrated, 4)
+    det["confidence_level"] = map_score_to_confidence_level(calibrated)
+
+    return calibrated
+
+
+def apply_confidence_calibration(detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Applies confidence calibration to every detection (in place, returns the list)."""
+    for det in detections:
+        try:
+            calibrate_detection_confidence(det)
+        except Exception as cal_err:
+            logger.warning(f"[CALIBRATION] Skipped detection calibration: {cal_err}")
+    return detections
 
 
 # ------------------------------------------------
@@ -402,6 +494,14 @@ def detect_objects(
             "overlay_preview": None,
             "mask_overlay_url": None,
         }
+
+    # 4.5 Confidence calibration: fuse DINO score + SigLIP verification +
+    #     SAM2 mask quality into a calibrated, display-ready confidence.
+    final_detections = apply_confidence_calibration(final_detections)
+    logger.info(
+        f"[PIPELINE] [CALIBRATION] Calibrated {len(final_detections)} detection confidences "
+        f"(DINO + SigLIP + SAM2 fusion)."
+    )
 
     # 5. Objective Land-Cover Coverage Calculation (truthful pixel accounting)
     seg_avail = seg_metadata.get("segmentation_available", False)

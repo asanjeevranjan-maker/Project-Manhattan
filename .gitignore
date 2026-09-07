@@ -71,4 +71,4 @@ __pycache__/
 venv/
 .pytest_cache/
 outputs/
-ai-service/cache/satellite/
+ai-service/cache/satellite/`n# Python bytecode`n__pycache__/`n*.pyc`n`n# Large model checkpoints (download separately)`nai-service/checkpoints/`nbackend/checkpoints/`n*.pt`n*.pth`n*.onnx`n`n# Diagnostic scripts`nai-service/diag_*.py`nbackend/diag_*.py

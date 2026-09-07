@@ -234,6 +234,111 @@ def validate_bbox(
     return True, None
 
 
+def count_edge_touches(
+    box: List[float],
+    image_width: int,
+    image_height: int,
+) -> int:
+    """
+    Counts how many image boundaries the box touches (within a small margin).
+    A box hugging 3+ borders is almost always a fallback / full-frame artifact.
+    """
+    try:
+        x1, y1, x2, y2 = [float(v) for v in box]
+    except (ValueError, TypeError):
+        return 4
+
+    margin = max(5.0, min(image_width, image_height) * 0.01)
+    touches = 0
+    if x1 <= margin:
+        touches += 1
+    if y1 <= margin:
+        touches += 1
+    if x2 >= image_width - margin:
+        touches += 1
+    if y2 >= image_height - margin:
+        touches += 1
+    return touches
+
+
+def passes_box_sanity(
+    box: List[float],
+    confidence: float,
+    image_width: int,
+    image_height: int,
+    label: str = "object",
+) -> Tuple[bool, str, Optional[str]]:
+    """
+    Giant-box sanity rule (centralised, config-driven).
+
+    A box is REJECTED when it covers more than MAX_BOX_AREA_RATIO of the image
+    AND fails the combined escape checks:
+      - detector confidence below LARGE_BOX_MIN_CONFIDENCE, OR
+      - it touches more than MAX_EDGE_TOUCHES_FOR_LARGE_BOX image borders.
+
+    Valid large objects can still pass when they are both high-confidence and
+    do not hug the image borders.
+
+    Returns:
+        (accepted, geometry_quality, rejection_reason)
+        geometry_quality is 'good' when accepted, 'rejected' otherwise.
+    """
+    from .config import (
+        MAX_BOX_AREA_RATIO,
+        LARGE_BOX_MIN_CONFIDENCE,
+        MAX_EDGE_TOUCHES_FOR_LARGE_BOX,
+    )
+
+    try:
+        x1, y1, x2, y2 = [float(v) for v in box]
+    except (ValueError, TypeError):
+        return False, "rejected", "Box coordinates are not numeric"
+
+    bw = max(0.0, x2 - x1)
+    bh = max(0.0, y2 - y1)
+    box_area = bw * bh
+    image_area = max(1.0, float(image_width) * float(image_height))
+    area_ratio = box_area / image_area
+
+    if box_area <= 0:
+        reason = "zero_area"
+        logger.info(
+            f"[BOX-FILTER] Rejected '{label}' reason={reason} "
+            f"box=[{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}]"
+        )
+        return False, "rejected", reason
+
+    if area_ratio <= MAX_BOX_AREA_RATIO:
+        logger.info(
+            f"[BOX-FILTER] Accepted '{label}' confidence={confidence:.2f} "
+            f"area_ratio={area_ratio:.2f}"
+        )
+        return True, "good", None
+
+    # Large box: apply combined escape checks.
+    edges = count_edge_touches(box, image_width, image_height)
+    low_confidence = float(confidence) < LARGE_BOX_MIN_CONFIDENCE
+    hugs_borders = edges > MAX_EDGE_TOUCHES_FOR_LARGE_BOX
+
+    if low_confidence or hugs_borders:
+        reason_code = "giant_low_confidence" if low_confidence else "giant_border_hugging"
+        logger.info(
+            f"[BOX-FILTER] Rejected '{label}' "
+            f"reason={reason_code} confidence={confidence:.2f} "
+            f"area_ratio={area_ratio:.2f} edges_touched={edges}"
+        )
+        return False, "rejected", (
+            f"{reason_code}: box covers {area_ratio * 100:.0f}% of image and touches "
+            f"{edges} boundaries (confidence={confidence:.2f})"
+        )
+
+    logger.info(
+        f"[BOX-FILTER] Accepted '{label}' (large but high-confidence) "
+        f"confidence={confidence:.2f} area_ratio={area_ratio:.2f} edges_touched={edges}"
+    )
+    return True, "good", None
+
+
 # =====================================================================
 # 4. CLASS-SPECIFIC CONFIGURABLE THRESHOLDS
 # =====================================================================
@@ -250,19 +355,27 @@ class ClassThreshold:
 
 DEFAULT_CLASS_THRESHOLDS: Dict[str, ClassThreshold] = {
     # Dense rooftop structures: max 25% of image area
+    # NOTE: On overhead/satellite imagery Grounding DINO assigns individual
+    # buildings scores in the ~0.20-0.45 range (full-scene false positives
+    # score higher but are rejected by max_area_ratio geometry filtering).
+    # min_score must therefore stay BELOW the typical real-detection band;
+    # SigLIP verification + NMS + geometry guards handle precision.
     "building": ClassThreshold(
-        box_threshold=0.32,
-        text_threshold=0.25,
-        min_score=0.35,
+        box_threshold=0.12,
+        text_threshold=0.10,
+        min_score=0.16,
         max_area_ratio=0.25,
         min_aspect=0.20,
         max_aspect=5.0,
     ),
     # Compact mobile objects (small footprint): max 5% of image area
+    # NOTE: GDINO raw scores for small objects on satellite imagery rarely
+    # exceed ~0.55; thresholds stay below that band. Precision is preserved
+    # by SigLIP verification + SAM2 mask-quality gating + geometry guards.
     "vehicle": ClassThreshold(
-        box_threshold=0.30,
-        text_threshold=0.25,
-        min_score=0.32,
+        box_threshold=0.22,
+        text_threshold=0.18,
+        min_score=0.26,
         max_area_ratio=0.05,
         min_aspect=0.25,
         max_aspect=4.0,
@@ -341,18 +454,21 @@ DEFAULT_CLASS_THRESHOLDS: Dict[str, ClassThreshold] = {
         max_area_ratio=0.25,
     ),
     # Maritime & aviation: ship max 15% of image area (rejects full harbor/bay false positives)
+    # NOTE: dim / partially-visible / dark-water vessels typically score 0.24-0.34
+    # raw. min_score was lowered from 0.35 after observing missed detections;
+    # SigLIP verification + SAM2 mask quality + geometry guards handle precision.
     "ship": ClassThreshold(
-        box_threshold=0.32,
-        text_threshold=0.25,
-        min_score=0.35,
+        box_threshold=0.20,
+        text_threshold=0.16,
+        min_score=0.24,
         max_area_ratio=0.15,
         min_aspect=0.15,
         max_aspect=8.0,
     ),
     "aircraft": ClassThreshold(
-        box_threshold=0.32,
-        text_threshold=0.25,
-        min_score=0.35,
+        box_threshold=0.22,
+        text_threshold=0.18,
+        min_score=0.26,
         max_area_ratio=0.08,
         min_aspect=0.20,
         max_aspect=5.0,
@@ -411,6 +527,10 @@ def normalize_label(raw_label: Any) -> Tuple[Optional[str], str]:
     if cleaned in ALIAS_TO_CANONICAL:
         return ALIAS_TO_CANONICAL[cleaned], cleaned
 
+    # Rule 3b: Simple plural fallback ('buildings' -> 'building')
+    if cleaned.endswith("s") and len(cleaned) > 3 and cleaned[:-1] in ALIAS_TO_CANONICAL:
+        return ALIAS_TO_CANONICAL[cleaned[:-1]], cleaned
+
     # Rule 4: Substring match against known aliases
     # Checks if any known alias is contained as a word boundary
     for alias, canonical in ALIAS_TO_CANONICAL.items():
@@ -464,17 +584,76 @@ def sanitize_prompt(prompt: Optional[str] = None, preset: Optional[str] = None) 
     # Split by period, comma, or 'and'
     raw_tokens = re.split(r"[,.;]+|\band\b", cleaned_input)
     selected_classes: List[str] = []
-    seen_classes: Set[str] = set()
+    seen_tokens: Set[str] = set()
+    seen_canonical: Set[str] = set()
 
     for token in raw_tokens:
         tok = token.strip().lower()
         if not tok or tok in STOPWORDS:
             continue
 
-        canonical, _ = normalize_label(tok)
-        if canonical and canonical not in seen_classes:
-            seen_classes.add(canonical)
+        canonical, cleaned_raw = normalize_label(tok)
+        if not canonical:
+            continue
+
+        # Keep the concrete phrase the user (or the frontend prompt builder)
+        # provided. Grounding DINO's text attention benefits substantially
+        # from synonym-rich chains ("building . rooftop . warehouse ."),
+        # so we must NOT collapse synonyms into one canonical class.
+        # Deduplicate on the raw phrase; the canonical class is tracked so
+        # that genuinely duplicated terms ("building . building .") are
+        # still suppressed.
+        phrase = cleaned_raw or canonical
+        if phrase in seen_tokens:
+            continue
+
+        # Always include the canonical class first for a known-new class,
+        # then keep subsequent distinct synonyms of that same class.
+        if canonical not in seen_canonical:
+            seen_canonical.add(canonical)
             selected_classes.append(canonical)
+            if phrase != canonical:
+                selected_classes.append(phrase)
+            seen_tokens.add(phrase)
+            continue
+
+        if phrase != canonical:
+            seen_tokens.add(phrase)
+            selected_classes.append(phrase)
+
+    # 5. Word-level fallback for free-text queries ("detect buildings in this
+    # image") where phrase-level parsing fails. Only words mapping to known
+    # canonical classes are accepted, so verbs/articles/locations are ignored.
+    # For each matched class the synonym chain is included (canonical first,
+    # then up to MAX_SYNONYMS_PER_CLASS aliases): Grounding DINO's text
+    # attention scores improve substantially with synonym-rich prompts
+    # ("building . house . rooftop . warehouse ."), which directly boosts
+    # recall on dense/small-structure imagery.
+    MAX_SYNONYMS_PER_CLASS = 5
+
+    def _class_phrases(canonical: str) -> List[str]:
+        phrases = [canonical]
+        for alias in SATELLITE_CLASSES.get(canonical, []):
+            if len(phrases) > MAX_SYNONYMS_PER_CLASS:
+                break
+            if alias != canonical and alias not in seen_tokens:
+                phrases.append(alias)
+        return phrases
+
+    if not selected_classes:
+        for word in re.findall(r"[a-z]+", cleaned_input):
+            if word in STOPWORDS:
+                continue
+            canonical, _ = normalize_label(word)
+            if (
+                canonical
+                and canonical in DEFAULT_CLASS_THRESHOLDS
+                and canonical not in seen_canonical
+            ):
+                seen_canonical.add(canonical)
+                for phrase in _class_phrases(canonical):
+                    selected_classes.append(phrase)
+                    seen_tokens.add(phrase)
 
     # Fallback to general preset if no observable classes were parsed
     if not selected_classes:
@@ -678,6 +857,24 @@ def filter_and_format_detections(
     else:
         deduped = dedup_res
         dedup_stats = None
+
+    # Giant-box sanity gate: reject fallback / full-frame artifacts that
+    # survived per-class ceilings (final safety net, logged per box).
+    sane: List[Dict[str, Any]] = []
+    for d in deduped:
+        accepted, quality, rejection_reason = passes_box_sanity(
+            box=d.get("box") or d.get("bbox") or [],
+            confidence=float(d.get("confidence") or d.get("score") or 0.0),
+            image_width=width,
+            image_height=height,
+            label=d.get("label", "object"),
+        )
+        d["geometry_quality"] = quality
+        d["source"] = "grounding_dino"
+        if accepted:
+            sane.append(d)
+
+    deduped = sane
 
     # Re-index with clean IDs
     for idx, d in enumerate(deduped):

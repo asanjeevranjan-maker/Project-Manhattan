@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Eye, EyeOff, Image as ImageIcon, Loader2, X, FileWarning } from 'lucide-react';
 import { useSatQueryStore } from '@/store/satquery';
 import { ImageUploader } from './image-uploader';
-import type { AnalysisResult } from '@/lib/types';
+import type { AnalysisResult, GroundingDinoDetection } from '@/lib/types';
 
 /**
  * ImageViewer renders the uploaded satellite image and overlays
@@ -52,6 +52,42 @@ export function ImageViewer() {
   const hasRegions = regions.length > 0;
   const hasMasks = Boolean(analysis?.maskOverlayUrl);
   const showAnyOverlay = hasRegions || hasMasks;
+
+  // Grounding DINO detections (dashed emerald boxes — visually distinct
+  // from the VLM's solid colored regions). These are real detector boxes.
+  const gdinoDetections = analysis?.groundingDetections ?? [];
+  const hasGdinoBoxes = gdinoDetections.length > 0;
+
+  // Phase 4: Limit displayed boxes for extreme cases (very high cap — typical
+  // scenes render fully; performance only degrades past ~200 boxes).
+  const MAX_VISIBLE_BOXES = 200;
+  const visibleRegions = regions.slice(0, MAX_VISIBLE_BOXES);
+  const hiddenCount = regions.length - visibleRegions.length;
+
+  /*
+   * Final render-time safety filter (defense in depth — the backend and the
+   * DINO conversion already apply this). A region is drawn ONLY when:
+   *  - its geometry is finite with positive width/height inside image bounds,
+   *  - its geometry_quality is not 'rejected',
+   *  - its source (when present) is a trusted computer-vision source.
+   * LLM/VLM/fallback sources can never create overlays.
+   */
+  const TRUSTED_SOURCES = new Set([
+    'grounding_dino',
+    'sam2',
+    'segmentation',
+    'land_cover_segmentation',
+  ]);
+
+  const renderableRegions = visibleRegions.filter((r) => {
+    if (r.geometryQuality === 'rejected') return false;
+    if (r.source && !TRUSTED_SOURCES.has(r.source)) return false;
+    const [x, y, w, h] = r.rect;
+    if (![x, y, w, h].every((v) => Number.isFinite(v))) return false;
+    if (w <= 0 || h <= 0) return false;
+    if (x < -0.01 || y < -0.01 || x + w > 1.01 || y + h > 1.01) return false;
+    return true;
+  });
 
   return (
     <div className="flex h-full min-h-[400px] flex-col gap-3">
@@ -184,10 +220,32 @@ export function ImageViewer() {
             {imgLoaded && showOverlay && hasRegions && (overlayMode === 'both' || overlayMode === 'boxes') && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                 <div className="relative h-full w-full">
-                  {regions.map((region, idx) => (
+                  {renderableRegions.map((region, idx) => (
                     <RegionBox key={`${idx}-${region.label}`} region={region} index={idx} />
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* Grounding DINO layer — dashed emerald detector boxes */}
+            {imgLoaded && showOverlay && hasGdinoBoxes && (overlayMode === 'both' || overlayMode === 'boxes') && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <div className="relative h-full w-full">
+                  {gdinoDetections.map((detection, idx) => (
+                    <GroundingDinoBox
+                      key={`${idx}-${detection.label}`}
+                      detection={detection}
+                      index={idx}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Phase 4: Indicator for hidden boxes */}
+            {imgLoaded && showOverlay && hasRegions && (overlayMode === 'both' || overlayMode === 'boxes') && hiddenCount > 0 && (
+              <div className="pointer-events-none absolute bottom-3 left-3 rounded-full bg-background/90 px-3 py-1.5 text-xs font-medium shadow-sm backdrop-blur">
+                Showing {visibleRegions.length} / {regions.length} detections
               </div>
             )}
           </>
@@ -256,6 +314,47 @@ function RegionBox({
   );
 }
 
+function GroundingDinoBox({
+  detection,
+  index,
+}: {
+  detection: GroundingDinoDetection;
+  index: number;
+}) {
+  const [x, y, w, h] = detection.rect;
+  const labelTop = index % 2 === 0 ? -22 : 6; // stagger labels so adjacent boxes don't collide
+  return (
+    <div
+      className="absolute"
+      style={{
+        left: `${x * 100}%`,
+        top: `${y * 100}%`,
+        width: `${w * 100}%`,
+        height: `${h * 100}%`,
+      }}
+    >
+      {/* Dashed emerald box — visually distinct from VLM's solid regions */}
+      <div
+        className="size-full border-2 border-dashed"
+        style={{
+          borderColor: '#10b981',
+          backgroundColor: 'rgba(16, 185, 129, 0.12)',
+          boxShadow: '0 0 0 1px rgba(16, 185, 129, 0.4)',
+        }}
+      />
+      <div
+        className="absolute left-0 flex items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 text-[9px] font-semibold text-white"
+        style={{ top: `${labelTop}px`, backgroundColor: '#10b981' }}
+      >
+        <span className="max-w-[120px] truncate">{detection.label}</span>
+        <span className="opacity-80">
+          {Math.round(detection.confidence * 100)}%
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function CoverageLegend({ analysis }: { analysis: AnalysisResult }) {
   return (
     <div className="rounded-lg border bg-card/60 p-3">
@@ -277,9 +376,13 @@ function CoverageLegend({ analysis }: { analysis: AnalysisResult }) {
             </span>
           ) : null}
         </div>
-        <span className="text-xs text-muted-foreground">
-          Overall confidence: <span className="font-semibold text-foreground">{Math.round(analysis.confidence * 100)}%</span>
-        </span>
+        {/* Confidence is shown only when a reliable numeric value exists
+            (0 means "not measurable" — e.g. pure text interpretation). */}
+        {analysis.confidence > 0 && (
+          <span className="text-xs text-muted-foreground">
+            Overall confidence: <span className="font-semibold text-foreground">{Math.round(analysis.confidence * 100)}%</span>
+          </span>
+        )}
       </div>
       <div className="flex flex-col gap-1.5">
         {analysis.coverage.map((c, i) => (

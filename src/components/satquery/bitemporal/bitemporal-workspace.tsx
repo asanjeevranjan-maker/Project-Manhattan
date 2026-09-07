@@ -1072,6 +1072,34 @@ export function BiTemporalWorkspace() {
                 </div>
               </div>
 
+              {/* Object detection (Grounding DINO + SAM2) stage summary */}
+              {result.objectDetection && (
+                <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 font-semibold text-emerald-700 dark:text-emerald-300">
+                    <Layers className="size-3" /> Grounding DINO + SAM
+                  </span>
+                  <span className="text-muted-foreground">
+                    T1: {result.objectDetection.t1.detectionsCount} objects · T2: {result.objectDetection.t2.detectionsCount} objects
+                  </span>
+                  {(result.objectDetection.t1.segmentationAvailable ||
+                    result.objectDetection.t2.segmentationAvailable) ? (
+                    <span className="rounded-full bg-primary/15 px-2 py-0.5 font-medium text-primary">
+                      SAM masks: {Math.max(result.objectDetection.t1.segmentedCount, result.objectDetection.t2.segmentedCount)} segmented
+                    </span>
+                  ) : (
+                    <span className="rounded-full bg-amber-500/15 px-2 py-0.5 font-medium text-amber-700 dark:text-amber-300">
+                      SAM unavailable — box-only matching
+                    </span>
+                  )}
+                  {(result.objectDetection.t1.verificationAvailable ||
+                    result.objectDetection.t2.verificationAvailable) && (
+                    <span className="rounded-full bg-sky-500/15 px-2 py-0.5 font-medium text-sky-700 dark:text-sky-300">
+                      SigLIP verified: {result.objectDetection.t1.verifiedCount + result.objectDetection.t2.verifiedCount}
+                    </span>
+                  )}
+                </div>
+              )}
+
               {/* View 1: Split Slider */}
               {resultViewMode === 'slider' && (
                 <ImageSlider
@@ -1096,6 +1124,37 @@ export function BiTemporalWorkspace() {
                         alt="Historical"
                         className="size-full object-contain"
                       />
+                      {/* GDINO change boxes on Time 1 */}
+                      <div className="pointer-events-none absolute inset-0">
+                        {result.changes
+                          .filter((c) => c.boxT1)
+                          .map((c) => {
+                            const [x1, y1, x2, y2] = c.boxT1!;
+                            const color =
+                              c.type === 'removed' ? '#ef4444' : c.type === 'modified' ? '#f59e0b' : '#64748b';
+                            return (
+                              <div
+                                key={`side-t1-${c.id}`}
+                                className="absolute border-2"
+                                style={{
+                                  left: `${(x1 / 640) * 100}%`,
+                                  top: `${(y1 / 640) * 100}%`,
+                                  width: `${((x2 - x1) / 640) * 100}%`,
+                                  height: `${((y2 - y1) / 640) * 100}%`,
+                                  borderColor: color,
+                                  backgroundColor: `${color}25`,
+                                }}
+                              >
+                                <span
+                                  className="absolute -top-5 left-0 whitespace-nowrap rounded px-1 text-[9px] font-bold text-white shadow"
+                                  style={{ backgroundColor: color }}
+                                >
+                                  {c.type === 'removed' ? 'REMOVED' : c.type === 'modified' ? 'MOD' : 'OK'} · {c.label}
+                                </span>
+                              </div>
+                            );
+                          })}
+                      </div>
                     </div>
                   </div>
                   <div className="space-y-1.5">
@@ -1108,6 +1167,37 @@ export function BiTemporalWorkspace() {
                         alt="Latest"
                         className="size-full object-contain"
                       />
+                      {/* GDINO change boxes on Time 2 */}
+                      <div className="pointer-events-none absolute inset-0">
+                        {result.changes
+                          .filter((c) => c.boxT2)
+                          .map((c) => {
+                            const [x1, y1, x2, y2] = c.boxT2!;
+                            const color =
+                              c.type === 'new' ? '#10b981' : c.type === 'modified' ? '#f59e0b' : '#64748b';
+                            return (
+                              <div
+                                key={`side-t2-${c.id}`}
+                                className="absolute border-2"
+                                style={{
+                                  left: `${(x1 / 640) * 100}%`,
+                                  top: `${(y1 / 640) * 100}%`,
+                                  width: `${((x2 - x1) / 640) * 100}%`,
+                                  height: `${((y2 - y1) / 640) * 100}%`,
+                                  borderColor: color,
+                                  backgroundColor: `${color}25`,
+                                }}
+                              >
+                                <span
+                                  className="absolute -top-5 left-0 whitespace-nowrap rounded px-1 text-[9px] font-bold text-white shadow"
+                                  style={{ backgroundColor: color }}
+                                >
+                                  {c.type === 'new' ? 'NEW' : c.type === 'modified' ? 'MOD' : 'OK'} · {c.label}
+                                </span>
+                              </div>
+                            );
+                          })}
+                      </div>
                     </div>
                   </div>
                 </div>

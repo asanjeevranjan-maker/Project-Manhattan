@@ -82,8 +82,13 @@ interface DinoDetection {
     mask_area_pixels?: number;
     bbox_area_pixels?: number;
     fill_ratio?: number;
+    mask_quality?: string;
   } | null;
   mask_area_pixels?: number;
+  // Backend box-sanity metadata (giant-box filter)
+  source?: string;
+  geometry_quality?: 'good' | 'suspicious' | 'rejected' | string;
+  geometry_rejection_reason?: string;
 }
 
 
@@ -106,6 +111,12 @@ interface DinoResponse {
     mask_overlay_url?: string | null;
     segmented_count?: number;
     total_detections?: number;
+    mask_quality?: {
+      good?: number;
+      suspicious?: number;
+      fallback?: number;
+    };
+    embedding_computed_count?: number;
   };
 }
 
@@ -607,18 +618,85 @@ function getDetectionIntent(
 // CONVERT DINO RESPONSE TO ANALYSIS
 // =========================================================
 
+/*
+ * Frontend safety filter (defense in depth — the backend
+ * already applies this rule). Mirrors the backend giant-box
+ * sanity rule: reject boxes covering > MAX_BOX_AREA_RATIO of
+ * the image unless confidence >= LARGE_BOX_MIN_CONFIDENCE
+ * and the box does not hug the image borders.
+ */
+const MAX_BOX_AREA_RATIO = 0.65;
+const LARGE_BOX_MIN_CONFIDENCE = 0.8;
+const MAX_EDGE_TOUCHES_FOR_LARGE_BOX = 2;
+
+function passesFrontendBoxSanity(
+  detection: DinoDetection,
+  imageWidth: number,
+  imageHeight: number,
+): boolean {
+  const [x1, y1, x2, y2] = detection.box;
+
+  // Finite check
+  if (![x1, y1, x2, y2].every((v) => Number.isFinite(v))) {
+    return false;
+  }
+
+  const bw = x2 - x1;
+  const bh = y2 - y1;
+
+  // Zero-area check
+  if (bw <= 0 || bh <= 0) {
+    return false;
+  }
+
+  // Bounds check (clip tolerance of 2px)
+  if (x1 < -2 || y1 < -2 || x2 > imageWidth + 2 || y2 > imageHeight + 2) {
+    return false;
+  }
+
+  const areaRatio = (bw * bh) / Math.max(1, imageWidth * imageHeight);
+  if (areaRatio <= MAX_BOX_AREA_RATIO) {
+    return true;
+  }
+
+  // Large box: combined escape checks
+  const margin = Math.max(5, Math.min(imageWidth, imageHeight) * 0.01);
+  let edges = 0;
+  if (x1 <= margin) edges += 1;
+  if (y1 <= margin) edges += 1;
+  if (x2 >= imageWidth - margin) edges += 1;
+  if (y2 >= imageHeight - margin) edges += 1;
+
+  const lowConfidence = detection.confidence < LARGE_BOX_MIN_CONFIDENCE;
+  const hugsBorders = edges > MAX_EDGE_TOUCHES_FOR_LARGE_BOX;
+
+  if (lowConfidence || hugsBorders) {
+    console.warn(
+      `[BOX-FILTER] Rejected '${detection.label}' reason=${
+        lowConfidence ? 'giant_low_confidence' : 'giant_border_hugging'
+      } confidence=${detection.confidence.toFixed(2)} area_ratio=${areaRatio.toFixed(2)} edges_touched=${edges}`,
+    );
+    return false;
+  }
+
+  return true;
+}
+
 function convertDinoToAnalysis(
   data: DinoResponse,
   query: string,
 ): AnalysisResult {
 
   // -------------------------------------------------------
-  // Bounding boxes
+  // Bounding boxes (with frontend giant-box safety filter)
   // -------------------------------------------------------
 
   const regions =
-    data.detections.map(
-      (detection) => {
+    data.detections
+      .filter((detection) =>
+        passesFrontendBoxSanity(detection, data.width, data.height),
+      )
+      .map((detection) => {
         const [x1, y1, x2, y2] = detection.box;
         return {
           label: detection.label,
@@ -630,12 +708,13 @@ function convertDinoToAnalysis(
             (y2 - y1) / data.height,
           ] as [number, number, number, number],
           confidence: detection.confidence,
+          source: 'grounding_dino' as const,
+          geometryQuality: detection.geometry_quality,
           polygon: detection.mask?.polygon,
           maskArea: detection.mask?.mask_area_pixels,
           fillRatio: detection.mask?.fill_ratio,
         };
-      },
-    );
+      });
 
 
   // -------------------------------------------------------
@@ -741,25 +820,109 @@ function convertDinoToAnalysis(
 
 
   // -------------------------------------------------------
-  // Overall detector confidence
+  // Overall confidence (Phase 8: transparent formula)
+  // -------------------------------------------------------
+  // The backend now emits CALIBRATED per-detection confidences
+  // (`confidence` = monotonic rescale of the raw DINO score, fused
+  // with SigLIP verification and SAM2 mask quality; `raw_score`
+  // preserves the original model score).
+  //
+  // When detections carry `raw_score` (fusion already happened
+  // server-side per detection):
+  //   overall = 0.80 * mean_calibrated_confidence
+  //           + 0.20 * segmentation_quality_score
+  //
+  // Legacy fallback (raw, uncalibrated detections):
+  //   overall = 0.55 * mean_detection_confidence
+  //           + 0.30 * mean_verification_confidence   (if SigLIP ran)
+  //           + 0.15 * segmentation_quality_score
+  //   with verification weight redistributed to detection when the
+  //   verifier was unavailable — the same signal is never counted twice.
   // -------------------------------------------------------
 
-  const overallConfidence =
-    data.detections.length >
-    0
+  const hasCalibratedBackend = data.detections.some(
+    (d) => typeof (d as any).raw_score === "number",
+  );
 
-      ? data.detections.reduce(
-          (
-            sum,
-            detection,
-          ) =>
-            sum +
-            detection.confidence,
-          0,
-        ) /
-        data.detections.length
-
+  const detectionConfs = data.detections.map((d) => d.confidence);
+  const meanDetectionConf =
+    detectionConfs.length > 0
+      ? detectionConfs.reduce((a, b) => a + b, 0) / detectionConfs.length
       : 0;
+
+  // Verification confidence: only when the SigLIP verifier actually
+  // produced a score for at least one detection (not skipped).
+  const verificationConfs = data.detections
+    .map((d) => {
+      const rec = (d as any).verification;
+      const vs =
+        typeof (d as any).vscore === "number"
+          ? ((d as any).vscore as number)
+          : rec && typeof rec.score === "number" && !rec.skipped
+            ? (rec.score as number)
+            : undefined;
+      return vs;
+    })
+    .filter((v): v is number => typeof v === "number");
+  const verifierRan = verificationConfs.length > 0;
+  const meanVerificationConf =
+    verificationConfs.length > 0
+      ? verificationConfs.reduce((a, b) => a + b, 0) / verificationConfs.length
+      : 0;
+
+  // Segmentation quality: weighted mask-quality score computed from
+  // per-detection masks when present (good=1.0, fallback=0.6,
+  // suspicious=0.2), falling back to the aggregate counts.
+  const perDetQuality = data.detections
+    .map((d): number | undefined => {
+      const q =
+        (d as any).mask_quality ??
+        (d as any).mask?.mask_quality ??
+        undefined;
+      if (q === "good") return 1.0;
+      if (q === "fallback") return 0.6;
+      if (q === "suspicious") return 0.2;
+      return undefined;
+    })
+    .filter((q): q is number => typeof q === "number");
+
+  const maskQualityCounts = data.segmentation?.mask_quality ?? {};
+  const totalSegmented =
+    (maskQualityCounts.good ?? 0) +
+    (maskQualityCounts.suspicious ?? 0) +
+    (maskQualityCounts.fallback ?? 0);
+
+  let segmentationQualityScore: number;
+  if (perDetQuality.length > 0) {
+    segmentationQualityScore =
+      perDetQuality.reduce((a, b) => a + b, 0) / perDetQuality.length;
+  } else if (totalSegmented > 0) {
+    segmentationQualityScore =
+      ((maskQualityCounts.good ?? 0) +
+        0.6 * (maskQualityCounts.fallback ?? 0) +
+        0.2 * (maskQualityCounts.suspicious ?? 0)) /
+      totalSegmented;
+  } else {
+    segmentationQualityScore = 1.0; // no segmentation — no penalty
+  }
+
+  let overallConfidence: number;
+  if (hasCalibratedBackend) {
+    // Server already fused DINO + SigLIP + SAM2 per detection.
+    overallConfidence =
+      0.8 * meanDetectionConf + 0.2 * segmentationQualityScore;
+  } else if (verifierRan) {
+    overallConfidence =
+      0.55 * meanDetectionConf +
+      0.3 * meanVerificationConf +
+      0.15 * segmentationQualityScore;
+  } else {
+    // No verifier: redistribute its weight instead of double-counting
+    // the detection signal.
+    overallConfidence =
+      0.7 * meanDetectionConf + 0.3 * segmentationQualityScore;
+  }
+  overallConfidence = Math.min(0.99, Math.max(0, overallConfidence));
 
 
   // -------------------------------------------------------
@@ -779,7 +942,7 @@ function convertDinoToAnalysis(
   ) {
 
     answer =
-      'Grounding DINO did not detect any matching objects in this image.';
+      'No reliable spatial detection found. Grounding DINO did not detect any matching objects in this image, so no bounding boxes or masks are shown. The AI analysis below is visual interpretation only.';
 
   } else {
 
@@ -887,6 +1050,13 @@ export function ChatPanel() {
     useSatQueryStore(
       (s) =>
         s.clearChat,
+    );
+
+
+  const modelSettings =
+    useSatQueryStore(
+      (s) =>
+        s.modelSettings,
     );
 
 
@@ -1305,6 +1475,14 @@ export function ChatPanel() {
                         detections:
                           dinoData.detections,
                       },
+
+                      // Grounding DINO settings
+                      // (runs alongside the VLM here too)
+                      useGroundingDino:
+                        modelSettings.useGroundingDino,
+
+                      hfToken:
+                        modelSettings.hfToken,
                     }),
                 },
               );
@@ -1619,6 +1797,14 @@ export function ChatPanel() {
 
                     model:
                       selectedModel,
+
+                    // Grounding DINO settings (per-request,
+                    // from localStorage-persisted store)
+                    useGroundingDino:
+                      modelSettings.useGroundingDino,
+
+                    hfToken:
+                      modelSettings.hfToken,
                   }),
               },
             );
@@ -2384,6 +2570,41 @@ function MessageBubble({
 
               )}
 
+
+            {/* Grounding DINO badge */}
+
+            {message.analysis &&
+              ((message.analysis.groundingDetections?.length ?? 0) >
+                0 ||
+                message.analysis.groundingFallback) && (
+                <div className="flex flex-wrap items-center gap-2 pt-1 text-[10px]">
+                  {(message.analysis.groundingDetections?.length ?? 0) >
+                    0 && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 font-semibold text-emerald-600 dark:text-emerald-400"
+                      title="Grounding DINO open-vocabulary detections (dashed emerald boxes on the image)"
+                    >
+                      <span className="size-1.5 rounded-full bg-emerald-500" />
+                      GD:{' '}
+                      {message.analysis.groundingDetections!.length}{' '}
+                      box
+                      {message.analysis.groundingDetections!.length ===
+                      1
+                        ? ''
+                        : 'es'}
+                    </span>
+                  )}
+
+                  {message.analysis.groundingFallback && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 font-medium text-amber-600 dark:text-amber-400"
+                      title="Grounding DINO was enabled but skipped because no Hugging Face token is configured"
+                    >
+                      GD skipped (no HF token)
+                    </span>
+                  )}
+                </div>
+              )}
 
             {/* Intent + confidence */}
 

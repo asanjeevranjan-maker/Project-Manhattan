@@ -105,13 +105,15 @@ def test_label_normalization_truncation_and_stopwords():
 # =====================================================================
 def test_class_specific_thresholds():
     """Tests that score, aspect ratio, and area ratio constraints are evaluated per class."""
-    # Building requires min_score 0.35 by default
+    # Building requires min_score 0.16 by default
+    # (lowered so real overhead buildings in the ~0.16-0.45 score band are kept;
+    # geometry guards + SigLIP verification handle precision/reject false positives)
     b_pass = format_detection("1", "building", score=0.40, box=[10, 10, 50, 50], width=500, height=500)
     assert b_pass is not None
     assert b_pass["label"] == "building"
 
-    b_fail = format_detection("2", "building", score=0.30, box=[10, 10, 50, 50], width=500, height=500)
-    assert b_fail is None  # Dropped because 0.30 < 0.35
+    b_fail = format_detection("2", "building", score=0.12, box=[10, 10, 50, 50], width=500, height=500)
+    assert b_fail is None  # Dropped because 0.12 < 0.16
 
     # River has lower score threshold (0.28)
     r_pass = format_detection("3", "river", score=0.29, box=[10, 10, 200, 30], width=500, height=500)
@@ -304,4 +306,22 @@ def test_fastapi_discovery_endpoints():
     data_thresh = res_thresh.json()
     assert "thresholds" in data_thresh
     assert "building" in data_thresh["thresholds"]
-    assert data_thresh["thresholds"]["building"]["min_score"] == 0.35
+    assert data_thresh["thresholds"]["building"]["min_score"] == 0.16
+
+
+def test_prompt_fallback_includes_synonym_chain():
+    """Free-text building queries must expand into a synonym-rich prompt chain.
+
+    A single-phrase prompt ("building .") collapses Grounding DINO's recall on
+    dense overhead imagery; the word-level fallback must therefore emit the
+    canonical class followed by its synonym aliases.
+    """
+    clean = sanitize_prompt("Detect buildings in this image.")
+    phrases = [p.strip() for p in clean.split(".") if p.strip()]
+    assert phrases[0] == "building"
+    # Must include multiple distinct synonym phrases for the building class
+    assert len(phrases) >= 4
+    assert "house" in phrases
+    assert "rooftop" in phrases or "roof" in phrases
+    # No duplicates
+    assert len(phrases) == len(set(phrases))

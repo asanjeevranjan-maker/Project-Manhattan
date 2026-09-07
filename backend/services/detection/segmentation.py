@@ -18,6 +18,8 @@ import io
 import math
 import base64
 import logging
+import threading
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Union, Set
 from PIL import Image, ImageDraw
 
@@ -89,8 +91,33 @@ except Exception:
 ENABLE_SEGMENTATION: bool = os.getenv("DINO_ENABLE_SEGMENTATION", "true").lower() in ("true", "1", "yes")
 
 # Checkpoint configurations
+# NOTE: The 'sam2' package resolves hydra configs relative to its bundled
+# configs/ directory, so the config name must include the 'configs/sam2/'
+# prefix. The checkpoint is resolved robustly in _resolve_checkpoint().
 SAM2_CHECKPOINT: str = os.getenv("SAM2_CHECKPOINT", "checkpoints/sam2_hiera_tiny.pt")
-SAM2_CONFIG: str = os.getenv("SAM2_CONFIG", "sam2_hiera_t.yaml")
+SAM2_CONFIG: str = os.getenv("SAM2_CONFIG", "configs/sam2/sam2_hiera_t.yaml")
+
+
+def _resolve_checkpoint(path: str) -> str:
+    """
+    Resolves a relative checkpoint path against common working directories,
+    so the service works whether it is started from the repo root,
+    ai-service/, or backend/.
+    """
+    if os.path.isabs(path) or os.path.exists(path):
+        return path
+
+    try:
+        repo_root = Path(__file__).resolve().parents[3]
+    except IndexError:
+        return path
+
+    for base in (repo_root, repo_root / "ai-service", repo_root / "backend"):
+        candidate = base / path
+        if candidate.exists():
+            return str(candidate)
+
+    return path
 
 # Preview image resolution limit for memory safety (pixels along longest dimension)
 MAX_OVERLAY_DIMENSION: int = int(os.getenv("SAM2_MAX_OVERLAY_DIMENSION", "1280"))
@@ -277,6 +304,53 @@ def compute_mask_area(binary_mask: Any, polygon: Optional[List[List[float]]] = N
     return 0
 
 
+def compute_mask_area_inside_bbox(binary_mask: Any, box: List[float]) -> int:
+    """
+    Counts foreground mask pixels strictly INSIDE the detection bounding box.
+
+    This is the correct metric for "fill ratio" (mask_area_inside_bbox / bbox_area).
+    A mask that spills outside the box must not inflate the ratio past 1.0.
+    """
+    if binary_mask is None:
+        return 0
+    if len(box) < 4:
+        return 0
+
+    try:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in box]
+    except (TypeError, ValueError):
+        return 0
+
+    # Clip the count region to the actual mask extent.
+    if NUMPY_AVAILABLE and isinstance(binary_mask, np.ndarray):
+        h, w = binary_mask.shape[:2]
+    elif isinstance(binary_mask, list) and binary_mask:
+        h = len(binary_mask)
+        w = len(binary_mask[0]) if h else 0
+    else:
+        h = w = 0
+
+    cx1 = max(0, min(x1, w))
+    cy1 = max(0, min(y1, h))
+    cx2 = max(cx1, min(x2, w))
+    cy2 = max(cy1, min(y2, h))
+    if cx2 <= cx1 or cy2 <= cy1:
+        return 0
+
+    if NUMPY_AVAILABLE and isinstance(binary_mask, np.ndarray):
+        sub = binary_mask[cy1:cy2, cx1:cx2]
+        return int(np.count_nonzero(sub))
+
+    # Pure-python fallback
+    count = 0
+    for r in range(cy1, cy2):
+        row = binary_mask[r]
+        for c in range(cx1, cx2):
+            if row[c]:
+                count += 1
+    return count
+
+
 # =====================================================================
 # 4. TRANSPARENT OVERLAY PREVIEW GENERATOR
 # =====================================================================
@@ -357,6 +431,14 @@ class SAM2PredictorWrapper:
     """
     Encapsulates SAM2 / SAM predictor initialization and inference.
     Supports CUDA / CPU selection, proper memory clearing, and rich diagnostic inspection.
+
+    Image-embedding caching (Phase 3):
+    --------------------------------
+    SAM2's predict() recomputes the image embedding on every set_image() call,
+    which is very expensive. This wrapper caches the last image embedding keyed
+    by the numpy array identity, so that all Grounding DINO boxes belonging to
+    ONE uploaded image reuse the SAME embedding. set_image() is only funneled
+    into the underlying predictor the first time a given image array is seen.
     """
     def __init__(
         self,
@@ -364,12 +446,66 @@ class SAM2PredictorWrapper:
         config_path: Optional[str] = None,
         device: Optional[str] = None,
     ):
-        self.checkpoint = checkpoint_path or SAM2_CHECKPOINT
+        self.checkpoint = _resolve_checkpoint(checkpoint_path or SAM2_CHECKPOINT)
         self.config = config_path or SAM2_CONFIG
         self.device = device or ("cuda" if (TORCH_AVAILABLE and torch.cuda.is_available()) else "cpu")
         self._predictor = None
         self._initialized = False
         self._failure_reason: Optional[str] = None
+        # Embedding cache
+        self._cached_image_np = None
+        self._embedding_computed_count = 0
+
+    def _same_image(self, image_np: Any) -> bool:
+        """Checks whether image_np corresponds to the already-cached embedding."""
+        if image_np is None:
+            return False
+        if image_np is self._cached_image_np:
+            return True
+        cached = self._cached_image_np
+        if cached is None or not NUMPY_AVAILABLE:
+            return False
+        try:
+            return (
+                getattr(cached, "shape", None) == getattr(image_np, "shape", None)
+                and bool(np.array_equal(cached, image_np))
+            )
+        except Exception:
+            return False
+
+    def set_image(self, image_np: Any) -> bool:
+        """
+        Sets the image on the underlying predictor, computing the image embedding
+        ONCE per uploaded image. Subsequent calls with the same array reuse the
+        cached embedding (no-op) instead of recomputing.
+        """
+        if not self._initialized and not self.initialize():
+            return False
+
+        if self._same_image(image_np):
+            return True
+
+        try:
+            if torch is not None:
+                context = torch.inference_mode() if hasattr(torch, "inference_mode") else torch.no_grad()
+            else:
+                context = None
+
+            def _run():
+                self._predictor.set_image(image_np)
+                self._embedding_computed_count += 1
+                self._cached_image_np = image_np
+
+            if context:
+                with context:
+                    _run()
+            else:
+                _run()
+            logger.info("[SAM2] Image embedding computed once.")
+            return True
+        except Exception as e:
+            logger.warning(f"[SAM2] set_image failed: {e}", exc_info=True)
+            return False
 
     def is_available(self) -> bool:
         if not TORCH_AVAILABLE:
@@ -436,8 +572,16 @@ class SAM2PredictorWrapper:
         """
         Runs box-prompted segmentation for a single detection box [x1, y1, x2, y2].
         Returns (binary_mask_2d, score).
+
+        The image embedding is computed at most ONCE per uploaded image: the
+        wrapper skips the underlying set_image() when the same image array was
+        already embedded, reusing the cached predictor state for every box.
         """
         if not self._initialized and not self.initialize():
+            return None, 0.0
+
+        # Cache image embedding (no-op if same image already embedded).
+        if not self.set_image(image_np):
             return None, 0.0
 
         try:
@@ -447,7 +591,6 @@ class SAM2PredictorWrapper:
                 context = None
 
             def _run():
-                self._predictor.set_image(image_np)
                 box_arr = np.array(box_xyxy, dtype=np.float32)
                 if SAM2_BACKEND == "sam2":
                     masks, scores, _ = self._predictor.predict(
@@ -475,6 +618,10 @@ class SAM2PredictorWrapper:
 
 # Lazy singleton instance
 _GLOBAL_SAM2_PREDICTOR: Optional[SAM2PredictorWrapper] = None
+
+# Serializes set_image/predict on the shared global predictor so concurrent
+# web requests never corrupt each other's cached image embedding.
+_SEG_LOCK = threading.Lock()
 
 def get_sam2_predictor() -> SAM2PredictorWrapper:
     global _GLOBAL_SAM2_PREDICTOR
@@ -566,6 +713,7 @@ def segment_detections(
     allowed_classes = segmentable_classes or DEFAULT_SEGMENTABLE_CLASSES
     segmented_detections: List[Dict[str, Any]] = []
     segmented_count = 0
+    mask_quality_counts = {"good": 0, "suspicious": 0, "fallback": 0}
 
     try:
         for det in detections:
@@ -606,23 +754,36 @@ def segment_detections(
                 poly = mask_to_polygon(raw_mask, box=box_xyxy)
                 rle = mask_to_rle(raw_mask)
                 bounds = compute_mask_bounds(poly)
-                area = compute_mask_area(raw_mask, polygon=poly)
-                fill_ratio = area / float(bbox_area_pixels)
+                # Phase 5 fix: count ONLY mask pixels INSIDE the bbox for fill_ratio.
+                # Using total mask area would count spillover pixels outside the box
+                # and could produce fill_ratio > 1.0 for masks that extend beyond the box.
+                area_inside_bbox = compute_mask_area_inside_bbox(raw_mask, box_xyxy)
+                fill_ratio = area_inside_bbox / float(bbox_area_pixels) if bbox_area_pixels > 0 else 0.0
 
-                if fill_ratio > 0.95:
+                # Defensive clamp (should be unnecessary after the fix, but guards
+                # against any floating-point edge cases).
+                fill_ratio = min(max(fill_ratio, 0.0), 1.0)
+
+                # Determine mask quality
+                if bbox_area_pixels <= 0:
+                    mask_quality = "fallback"
+                elif fill_ratio > 0.97:
+                    mask_quality = "suspicious"
                     logger.warning(
-                        f"[SAM2] High fill_ratio ({fill_ratio:.2f} > 0.95) for '{label}' box {box_xyxy}. "
+                        f"[SAM2] High fill_ratio ({fill_ratio:.2f} > 0.97) for '{label}' box {box_xyxy}. "
                         "Mask covers nearly entire box (possible box-shaped fallback)."
                     )
-                elif fill_ratio < 0.01:
+                elif fill_ratio < 0.05:
+                    mask_quality = "suspicious"
                     logger.warning(
-                        f"[SAM2] Low fill_ratio ({fill_ratio:.4f} < 0.01) for '{label}' box {box_xyxy}. "
+                        f"[SAM2] Low fill_ratio ({fill_ratio:.4f} < 0.05) for '{label}' box {box_xyxy}. "
                         "Mask is very sparse or empty."
                     )
                 else:
+                    mask_quality = "good"
                     logger.info(
-                        f"[SAM2] Mask generated for '{label}': area={area}px, fill_ratio={fill_ratio:.3f}, "
-                        f"points={len(poly)}, bounds={bounds}"
+                        f"[SAM2] Mask generated for '{label}': area_inside_bbox={area_inside_bbox}px, "
+                        f"fill_ratio={fill_ratio:.3f}, quality={mask_quality}, points={len(poly)}, bounds={bounds}"
                     )
 
                 det_copy["mask"] = {
@@ -630,14 +791,17 @@ def segment_detections(
                     "polygon": poly,
                     "bounds": bounds,
                     "rle": rle,
-                    "mask_area_pixels": area,
+                    "mask_area_pixels": area_inside_bbox,
                     "bbox_area_pixels": round(bbox_area_pixels, 1),
                     "fill_ratio": round(fill_ratio, 3),
+                    "mask_quality": mask_quality,
                 }
-                det_copy["mask_area_pixels"] = area
+                det_copy["mask_area_pixels"] = area_inside_bbox
                 det_copy["bbox_area_pixels"] = round(bbox_area_pixels, 1)
                 det_copy["fill_ratio"] = round(fill_ratio, 3)
+                det_copy["mask_quality"] = mask_quality
                 segmented_count += 1
+                mask_quality_counts[mask_quality] = mask_quality_counts.get(mask_quality, 0) + 1
             else:
                 # If SAM failed for this specific box, provide clean fallback without crashing
                 logger.warning(f"[SAM2] Predictor returned no mask for box {box_xyxy} ('{label}')")
@@ -662,6 +826,7 @@ def segment_detections(
             torch.cuda.empty_cache()
 
         backend_name = diag.get("sam2_backend") or getattr(predictor, "backend", None) or SAM2_BACKEND or "custom"
+        embedding_count = getattr(predictor, "_embedding_computed_count", 0)
         metadata = {
             "segmentation_available": True,
             "sam2_available": True,
@@ -676,11 +841,15 @@ def segment_detections(
             "backend": backend_name,
             "overlay_preview": overlay_preview,
             "mask_overlay_url": overlay_preview,
+            "mask_quality": mask_quality_counts,
+            "embedding_computed_count": embedding_count,
         }
 
         logger.info(
             f"[SAM2] Successfully segmented {segmented_count}/{total_count} detections. "
-            f"Overlay generated: {overlay_preview is not None}."
+            f"Overlay generated: {overlay_preview is not None}. "
+            f"Mask quality: {mask_quality_counts}. "
+            f"Embedding computed {embedding_count} time(s)."
         )
 
         return segmented_detections, metadata

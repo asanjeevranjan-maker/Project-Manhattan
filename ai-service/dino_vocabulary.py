@@ -29,6 +29,8 @@ try:
         remove_duplicate_detections,
         box_iou,
         validate_bbox,
+        count_edge_touches,
+        passes_box_sanity,
     )
     from services.detection.tiler import (
         TILE_SIZE,
@@ -114,6 +116,8 @@ __all__ = [
     "remove_duplicate_detections",
     "box_iou",
     "validate_bbox",
+    "count_edge_touches",
+    "passes_box_sanity",
     "TILE_SIZE",
     "TILE_OVERLAP",
     "ENABLE_TILING",

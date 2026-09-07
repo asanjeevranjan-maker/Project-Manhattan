@@ -2,7 +2,19 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import type { ChatMessage, UploadedImage, AnalysisResult } from '@/lib/types';
+import type {
+  ChatMessage,
+  UploadedImage,
+  AnalysisResult,
+  ModelSettings,
+} from '@/lib/types';
+
+const DEFAULT_MODEL_SETTINGS: ModelSettings = {
+  vlm: 'glm',
+  geminiApiKey: '',
+  hfToken: '',
+  useGroundingDino: false,
+};
 
 interface SatQueryState {
   // Currently active image (the one being analyzed)
@@ -17,6 +29,8 @@ interface SatQueryState {
   showOverlay: boolean;
   // View mode for the image viewer
   viewMode: 'original' | 'overlay';
+  // Per-user model settings (VLM choice, API keys, Grounding DINO toggle)
+  modelSettings: ModelSettings;
 
   // Actions
   setActiveImage: (img: UploadedImage | null) => void;
@@ -26,6 +40,7 @@ interface SatQueryState {
   setIsAnalyzing: (v: boolean) => void;
   setShowOverlay: (v: boolean) => void;
   setViewMode: (m: 'original' | 'overlay') => void;
+  setModelSettings: (updates: Partial<ModelSettings>) => void;
   clearChat: () => void;
   reset: () => void;
 }
@@ -39,6 +54,7 @@ export const useSatQueryStore = create<SatQueryState>()(
       isAnalyzing: false,
       showOverlay: true,
       viewMode: 'original',
+      modelSettings: DEFAULT_MODEL_SETTINGS,
 
       setActiveImage: (img) =>
         set((s) => ({
@@ -60,6 +76,10 @@ export const useSatQueryStore = create<SatQueryState>()(
       setIsAnalyzing: (v) => set({ isAnalyzing: v }),
       setShowOverlay: (v) => set({ showOverlay: v }),
       setViewMode: (m) => set({ viewMode: m }),
+      setModelSettings: (updates) =>
+        set((s) => ({
+          modelSettings: { ...s.modelSettings, ...updates },
+      })),
       clearChat: () => set({ messages: [], latestAnalysis: null }),
       reset: () =>
         set({
@@ -79,6 +99,7 @@ export const useSatQueryStore = create<SatQueryState>()(
       partialize: (state) => ({
         showOverlay: state.showOverlay,
         viewMode: state.viewMode,
+        modelSettings: state.modelSettings,
       }),
     }
   )

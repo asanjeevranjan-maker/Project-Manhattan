@@ -174,10 +174,29 @@ class SiglipDetectionVerifier:
             return False
 
         try:
-            logger.info(f"[SigLIP Verifier] Loading model '{self.model_name}'...")
-            self._device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
-            self._processor = AutoProcessor.from_pretrained(self.model_name)
-            self._model = AutoModel.from_pretrained(self.model_name).to(self._device)
+            # Prefer a fully-local load (cache only) so a secondary verifier
+            # NEVER blocks the primary detection path on a fresh deploy that
+            # has not yet cached the model weights.
+            try:
+                logger.info(f"[SigLIP Verifier] Loading model '{self.model_name}' from cache...")
+                self._device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
+                load_kwargs: Dict[str, Any] = {"local_files_only": True}
+                self._processor = AutoProcessor.from_pretrained(self.model_name, **load_kwargs)
+                self._model = AutoModel.from_pretrained(self.model_name, **load_kwargs).to(self._device)
+            except Exception:
+                # Not yet cached -> download, but bound the transfer so a stalled
+                # network cannot hold up detection indefinitely. If this fails we
+                # fall through to the existing fail-open path (detections unchanged).
+                logger.info(
+                    f"[SigLIP Verifier] Model not in cache; downloading '{self.model_name}' "
+                    "with bounded transfer timeout (HF_HUB_DOWNLOAD_TIMEOUT)..."
+                )
+                os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "10")
+                os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "5")
+                self._device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
+                self._processor = AutoProcessor.from_pretrained(self.model_name)
+                self._model = AutoModel.from_pretrained(self.model_name).to(self._device)
+
             self._model.eval()
             self.initialized = True
             logger.info(f"[SigLIP Verifier] Successfully loaded on device: {self._device}")

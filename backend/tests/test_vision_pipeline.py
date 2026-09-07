@@ -163,8 +163,13 @@ def test_legacy_analysis_result_mapping(mock_gemini_json_response: str):
     assert "objectsDetected" in legacy
     assert "coverage" in legacy
     assert "regions" in legacy
-    assert len(legacy["objectsDetected"]) == 2
-    assert legacy["objectsDetected"][0]["region"] == "center"
+    # SPATIAL-GEOMETRY POLICY: LLM/VLM text observations must NEVER become
+    # detections or bboxes. Detector-confirmed objects come exclusively from
+    # Grounding DINO via /detect. Text findings remain in answer/summary.
+    assert legacy["objectsDetected"] == []
+    assert legacy["regions"] == []
+    # No fabricated numeric confidence for pure text interpretation.
+    assert legacy["confidence"] == 0.0
 
 
 # =========================================================
@@ -318,3 +323,66 @@ def test_fastapi_analyze_endpoint(sample_data_url: str, mock_gemini_json_respons
         assert len(data["observations"]) == 2
         assert "analysis" in data  # backward-compatible legacy key
         assert "answer" in data["analysis"]
+
+
+@pytest.mark.asyncio
+async def test_fallback_both_providers_fail_uses_local_analytical_engine(sample_data_url: str):
+    service = VisionService()
+
+    # Mock both providers failing (e.g. GLM 429 and Gemini 401)
+    service.glm.analyze = AsyncMock(side_effect=VisionProviderRateLimitError("GLM overloaded (code 1305)", status_code=429, provider="glm"))
+    service.gemini.analyze = AsyncMock(side_effect=VisionProviderAuthError("Invalid credentials (401)", status_code=401, provider="gemini"))
+
+    result = await service.analyze_image(
+        image_data=sample_data_url,
+        user_query="How many vessels are present?",
+        provider="glm",
+        detection_context={
+            "count": 3,
+            "detections": [
+                {"label": "vessel", "confidence": 0.91, "relative_location": "top-right", "box": [10, 10, 50, 50]},
+                {"label": "vessel", "confidence": 0.88, "relative_location": "top-right", "box": [60, 10, 100, 50]},
+                {"label": "dock", "confidence": 0.95, "relative_location": "center", "box": [100, 100, 200, 200]},
+            ]
+        },
+    )
+
+    assert result["success"] is True
+    assert result["provider_used"] == "local_analytical_engine"
+    assert result["fallback_used"] is True
+    assert "structured_analysis" in result
+    struct = result["structured_analysis"]
+    assert "3 objects" in struct.answer or "vessel" in struct.answer
+    assert any("vessel" in obs.finding for obs in struct.observations)
+
+
+def test_fastapi_analyze_endpoint_both_providers_fail_returns_local_synthesis(sample_data_url: str):
+    from fastapi.testclient import TestClient
+    from main import app, vision_service
+
+    with patch.object(vision_service.glm, "analyze", AsyncMock(side_effect=VisionProviderRateLimitError("GLM 429", status_code=429, provider="glm"))), \
+         patch.object(vision_service.gemini, "analyze", AsyncMock(side_effect=VisionProviderAuthError("Gemini 401", status_code=401, provider="gemini"))):
+        client = TestClient(app)
+        res = client.post(
+            "/analyze",
+            json={
+                "imageDataUrl": sample_data_url,
+                "user_query": "Count ships in harbor",
+                "provider": "glm",
+                "detection_context": {
+                    "count": 2,
+                    "detections": [
+                        {"label": "ship", "confidence": 0.89, "relative_location": "center", "box": [50, 50, 80, 80]},
+                        {"label": "ship", "confidence": 0.85, "relative_location": "center", "box": [90, 50, 120, 80]},
+                    ]
+                }
+            },
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["success"] is True
+        assert data["provider"] == "local_analytical_engine"
+        assert len(data["observations"]) > 0
+        assert "analysis" in data
+        assert "ship" in data["analysis"]["answer"].lower()
+

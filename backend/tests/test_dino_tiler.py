@@ -31,10 +31,13 @@ from services.detection.vocabulary import filter_and_format_detections
 
 def test_tiling_constants_and_defaults():
     """Verify default parameters match satellite detection specifications."""
-    assert TILE_SIZE == 1024
-    assert TILE_OVERLAP == 0.15
+    # 512px tiles give DINO's processor (800px shortest edge) a ~1.56x zoom,
+    # which is required for small-structure recall in dense imagery.
+    assert TILE_SIZE == 512
+    assert TILE_OVERLAP == 0.25
     assert ENABLE_TILING is True
-    assert MIN_IMAGE_SIZE_FOR_TILING == 1024
+    # 768 ensures 1024x1024 samples are tiled into a 3x3 grid (9 tiles).
+    assert MIN_IMAGE_SIZE_FOR_TILING == 768
     assert MAX_TILES == 16
 
 

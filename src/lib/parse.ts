@@ -570,62 +570,14 @@ export function parseAnalysis(
   }
 
   // -------------------------------------------------------
-  // Objects
+  // Objects — REMOVED
+  //
+  // The LLM's "objects_detected" entries are visual
+  // interpretation with invented confidence values, not
+  // detector-confirmed counts. They are NOT mapped into
+  // DetectedObject badges. Grounding DINO counts are used
+  // instead (see chat-panel convertDinoToAnalysis).
   // -------------------------------------------------------
-
-  const objectsDetected:
-    DetectedObject[] =
-    (parsed.objects_detected ?? [])
-      .filter(
-        (item) =>
-          Boolean(item) &&
-          typeof item === 'object'
-      )
-      .map((object) => ({
-        class: asString(
-          object.class,
-          'unknown'
-        ),
-
-        confidence: clamp01(
-          asNumber(
-            object.confidence,
-            0.5
-          )
-        ),
-
-        count:
-          typeof object.count === 'number'
-            ? object.count
-            : undefined,
-
-        region: (() => {
-  const region = asString(
-    object.region,
-    'center'
-  );
-
-  const validRegions: DetectedObject['region'][] = [
-    'north',
-    'south',
-    'east',
-    'west',
-    'center',
-    'widespread',
-  ];
-
-  return validRegions.includes(
-    region as DetectedObject['region']
-  )
-    ? (region as DetectedObject['region'])
-    : 'center';
-})(),
-        note:
-          asString(
-            object.note,
-            ''
-          ) || undefined,
-      }));
 
   // -------------------------------------------------------
   // Land-cover coverage
@@ -659,53 +611,18 @@ export function parseAnalysis(
       }));
 
   // -------------------------------------------------------
-  // Existing visualization regions
+  // Visualization regions — SAFETY FILTER
+  //
+  // The satquery JSON block is produced by an LLM/VLM.
+  // Language models must NEVER create spatial geometry:
+  // any `regions` array in their output is invented
+  // (no Grounding DINO / SAM2 / segmentation backing) and
+  // is intentionally DISCARDED here. Real overlays come
+  // exclusively from the /detect pipeline (Grounding DINO
+  // + SAM2) and are attached separately by the caller.
   // -------------------------------------------------------
 
-  const regions =
-    (parsed.regions ?? [])
-      .map((region) => {
-        const rect =
-          normalizeRect(
-            region.rect
-          );
-
-        if (!rect) {
-          return null;
-        }
-
-        return {
-          label: asString(
-            region.label,
-            asString(
-              region.class,
-              'Region'
-            )
-          ),
-
-          color: asString(
-            region.color,
-            '#8b5cf6'
-          ),
-
-          rect,
-
-          confidence: clamp01(
-            asNumber(
-              region.confidence,
-              0.8
-            )
-          ),
-        };
-      })
-      .filter(
-        (
-          region
-        ): region is NonNullable<
-          typeof region
-        > =>
-          region !== null
-      );
+  const regions: AnalysisResult['regions'] = [];
 
   // -------------------------------------------------------
   // Flood analysis
@@ -730,6 +647,11 @@ export function parseAnalysis(
 
   // -------------------------------------------------------
   // Final result
+  //
+  // objectsDetected is also dropped: the LLM's
+  // "objects_detected" entries are visual interpretation
+  // with invented confidence values, not detector-confirmed
+  // counts. Detector counts come from Grounding DINO.
   // -------------------------------------------------------
 
   return {
@@ -739,7 +661,7 @@ export function parseAnalysis(
 
     intent,
 
-    objectsDetected,
+    objectsDetected: [],
 
     confidence:
       clamp01(

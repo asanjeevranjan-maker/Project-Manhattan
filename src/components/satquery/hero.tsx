@@ -1,7 +1,7 @@
 'use client';
 
 import { Button } from '@/components/ui/button';
-import { ArrowRight, MessageSquare, Satellite, ScanEye, BarChart3, GitCompareArrows } from 'lucide-react';
+import { ArrowRight, MessageSquare, Satellite, ScanEye, BarChart3, GitCompareArrows, RadioTower } from 'lucide-react';
 import { ImageUploader } from './image-uploader';
 import { SampleImages } from './sample-images';
 import { useSatQueryStore } from '@/store/satquery';
@@ -9,9 +9,10 @@ import { useSatQueryStore } from '@/store/satquery';
 interface Props {
   onLaunch: () => void;
   onLaunchBiTemporal?: () => void;
+  onLaunchFusion?: () => void;
 }
 
-export function Hero({ onLaunch, onLaunchBiTemporal }: Props) {
+export function Hero({ onLaunch, onLaunchBiTemporal, onLaunchFusion }: Props) {
   const activeImage = useSatQueryStore((s) => s.activeImage);
 
   return (
@@ -54,6 +55,15 @@ export function Hero({ onLaunch, onLaunchBiTemporal }: Props) {
               >
                 <GitCompareArrows className="size-4 text-primary" />
                 Bi-Temporal Comparison
+              </Button>
+              <Button
+                size="lg"
+                variant="outline"
+                onClick={onLaunchFusion || onLaunch}
+                className="gap-2"
+              >
+                <RadioTower className="size-4 text-emerald-500" />
+                Optical + SAR Fusion
               </Button>
             </div>
 

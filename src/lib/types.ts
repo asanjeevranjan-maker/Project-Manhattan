@@ -153,6 +153,27 @@ export interface FloodAnalysis {
 
 
 // ---------------------------------------------------------
+// Grounding DINO (open-vocabulary detection)
+// ---------------------------------------------------------
+
+export interface GroundingDinoDetection {
+  label: string;
+  confidence: number; // 0..1
+  rect: [number, number, number, number]; // [x, y, w, h] normalized 0..1
+}
+
+// ---------------------------------------------------------
+// Per-user model settings (persisted in localStorage)
+// ---------------------------------------------------------
+
+export interface ModelSettings {
+  vlm: 'glm' | 'gemini';
+  geminiApiKey: string;
+  hfToken: string; // Hugging Face token for Grounding DINO
+  useGroundingDino: boolean; // toggle on/off
+}
+
+// ---------------------------------------------------------
 // Main analysis result
 // ---------------------------------------------------------
 
@@ -188,6 +209,14 @@ export interface AnalysisResult {
 
     confidence: number;
 
+    // Geometry provenance. Only trusted CV sources may be rendered:
+    // 'grounding_dino' | 'sam2' | 'segmentation' | 'land_cover_segmentation'.
+    // Anything else (llm / vlm / fallback / visual_assessment) is rejected.
+    source?: 'grounding_dino' | 'sam2' | 'segmentation' | 'land_cover_segmentation' | string;
+
+    // Spatial quality status from the backend box-sanity filter.
+    geometryQuality?: 'good' | 'suspicious' | 'rejected' | string;
+
     // Optional segmentation mask polygon vertices [[x, y], ...]
     polygon?: [number, number][];
 
@@ -213,6 +242,14 @@ export interface AnalysisResult {
 
     netChange?: string;
   };
+
+  // Grounding DINO detections (open-vocabulary detector boxes).
+  // Runs ALONGSIDE the VLM — the VLM result above is still complete.
+  groundingDetections?: GroundingDinoDetection[];
+
+  // True when Grounding DINO was enabled but skipped because no
+  // Hugging Face token was configured.
+  groundingFallback?: boolean;
 }
 
 
@@ -459,6 +496,18 @@ export interface PixelChangeResult {
   totalPixels: number;
 }
 
+export interface TemporalDetectionStageMeta {
+  detectionsCount: number;
+  segmentationAvailable: boolean;
+  segmentedCount: number;
+  samBackend?: string | null;
+  segmentationFailureReason?: string | null;
+  verificationAvailable: boolean;
+  verifiedCount: number;
+  rejectedCount: number;
+  tilingEnabled: boolean;
+}
+
 export interface TemporalComparisonResult {
   success: boolean;
   aoi?: AOIBounds | null;
@@ -475,6 +524,11 @@ export interface TemporalComparisonResult {
   summary: TemporalSummary;
   changes: TemporalChangeItem[];
   pixelChange?: PixelChangeResult | null;
+  /** Per-timestamp Grounding DINO + SAM2 detection stage summary (when backend AI service ran). */
+  objectDetection?: {
+    t1: TemporalDetectionStageMeta;
+    t2: TemporalDetectionStageMeta;
+  } | null;
   images: {
     t1DataUrl: string;
     t2DataUrl: string;

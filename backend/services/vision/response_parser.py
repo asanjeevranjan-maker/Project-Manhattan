@@ -191,39 +191,17 @@ def to_legacy_analysis_result(
     Converts SatelliteAnalysisStructured into the exact shape expected by
     the Next.js frontend (AnalysisResult schema in src/lib/types.ts).
     Ensures 100% zero-regression backward compatibility.
+
+    IMPORTANT (spatial-geometry policy):
+    The vision service produces TEXT analysis only. LLM/VLM observations are
+    natural-language findings ("large water body on the left") and must NEVER
+    be converted into bounding boxes, rectangles, or numeric confidences.
+    Spatial geometry may only come from Grounding DINO / SAM2 / land-cover
+    segmentation via the /detect pipeline. Therefore:
+      - regions is ALWAYS empty from this parser (no synthetic bboxes).
+      - objectsDetected is ALWAYS empty from this parser (no fake counts or
+        fabricated confidence numbers). Text findings live in answer/summary.
     """
-    # Map observations to legacy objectsDetected
-    objects_detected: List[Dict[str, Any]] = []
-    regions: List[Dict[str, Any]] = []
-
-    quad_to_rect = {
-        "upper-left": [0.05, 0.05, 0.40, 0.40],
-        "upper-right": [0.55, 0.05, 0.40, 0.40],
-        "center": [0.30, 0.30, 0.40, 0.40],
-        "lower-left": [0.05, 0.55, 0.40, 0.40],
-        "lower-right": [0.55, 0.55, 0.40, 0.40],
-        "widespread": [0.10, 0.10, 0.80, 0.80],
-    }
-
-    conf_num = {"high": 0.90, "medium": 0.75, "low": 0.55}
-
-    for idx, obs in enumerate(structured.observations[:6]):
-        c_num = conf_num.get(obs.confidence.lower(), 0.75)
-        objects_detected.append({
-            "class": obs.finding,
-            "confidence": c_num,
-            "count": 1,
-            "region": obs.location,
-            "note": obs.evidence or obs.finding,
-        })
-        rect = quad_to_rect.get(obs.location.lower(), [0.25, 0.25, 0.50, 0.50])
-        regions.append({
-            "label": obs.finding,
-            "color": "#06b6d4" if idx % 2 == 0 else "#f97316",
-            "rect": rect,
-            "confidence": c_num,
-        })
-
     # Objective land-cover coverage (only populated when measured from segmentation masks)
     if land_cover_result and land_cover_result.get("available"):
         coverage = land_cover_result.get("coverage", [])
@@ -241,13 +219,19 @@ def to_legacy_analysis_result(
         "answer": structured.answer or structured.answer_to_query,
         "summary": structured.summary,
         "intent": intent,
-        "objectsDetected": objects_detected,
-        "confidence": 0.88,
+        # Text observations are interpretation, not detections: they stay in
+        # the answer text and are NOT mapped into objects/regions.
+        "objectsDetected": [],
+        # No reliable numeric confidence exists for pure text interpretation.
+        # 0 means "not measurable" — the frontend hides it instead of
+        # displaying a fabricated percentage.
+        "confidence": 0.0,
         "coverage": coverage,
         "land_cover": land_cover_meta,
         "measured_from_masks": bool(land_cover_result and land_cover_result.get("measured_from_masks")),
         "estimated": False,
-        "regions": regions,
+        # NEVER synthesize bboxes from LLM/VLM text (quad_to_rect removed).
+        "regions": [],
         "evidence": structured.evidence.model_dump(),
         "calculated_statistics": structured.calculated_statistics,
         "observed_changes": structured.observed_changes,

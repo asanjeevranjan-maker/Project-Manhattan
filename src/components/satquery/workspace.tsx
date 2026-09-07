@@ -9,16 +9,18 @@ import { ImageUploader } from './image-uploader';
 import { SampleImages } from './sample-images';
 import { BiTemporalWorkspace } from './bitemporal/bitemporal-workspace';
 import { Button } from '@/components/ui/button';
-import { ChevronLeft, Sparkles, ScanEye, GitCompareArrows } from 'lucide-react';
+import { ChevronLeft, Sparkles, ScanEye, GitCompareArrows, RadioTower } from 'lucide-react';
 import { SatQueryWordmark } from './logo';
+import { ModelSettingsDialog } from './model-settings-dialog';
+import { FusionWorkspace } from './fusion/fusion-workspace';
 
 interface Props {
   onExit: () => void;
-  initialTab?: 'single' | 'bitemporal';
+  initialTab?: 'single' | 'bitemporal' | 'fusion';
 }
 
 export function Workspace({ onExit, initialTab = 'single' }: Props) {
-  const [workspaceTab, setWorkspaceTab] = useState<'single' | 'bitemporal'>(initialTab);
+  const [workspaceTab, setWorkspaceTab] = useState<'single' | 'bitemporal' | 'fusion'>(initialTab);
   const activeImage = useSatQueryStore((s) => s.activeImage);
   const latestAnalysis = useSatQueryStore((s) => s.latestAnalysis);
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -71,13 +73,30 @@ export function Workspace({ onExit, initialTab = 'single' }: Props) {
           >
             <GitCompareArrows className="size-3.5 text-primary" /> Bi-Temporal Comparison
           </button>
+          <button
+            type="button"
+            onClick={() => setWorkspaceTab('fusion')}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-semibold transition ${
+              workspaceTab === 'fusion'
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <RadioTower className="size-3.5 text-emerald-500" /> Optical + SAR Fusion
+          </button>
         </div>
 
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <ModelSettingsDialog />
           {workspaceTab === 'bitemporal' ? (
             <span className="flex items-center gap-1.5 text-primary font-medium">
               <span className="size-1.5 rounded-full bg-emerald-500 glow-pulse" />
               Temporal Engine Active
+            </span>
+          ) : workspaceTab === 'fusion' ? (
+            <span className="flex items-center gap-1.5 text-primary font-medium">
+              <span className="size-1.5 rounded-full bg-emerald-500 glow-pulse" />
+              Fusion Engine Active
             </span>
           ) : activeImage ? (
             <>
@@ -100,6 +119,9 @@ export function Workspace({ onExit, initialTab = 'single' }: Props) {
         {workspaceTab === 'bitemporal' ? (
           /* Real-Time / Bi-Temporal Comparison Mode */
           <BiTemporalWorkspace />
+        ) : workspaceTab === 'fusion' ? (
+          /* Optical + SAR Fusion Mode (third analysis section) */
+          <FusionWorkspace />
         ) : !activeImage ? (
           /* Onboarding screen when no single image is loaded */
           <div className="mx-auto max-w-3xl space-y-6 py-8">

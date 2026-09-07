@@ -1,13 +1,30 @@
+import sys
+from pathlib import Path
+
+# Ensure backend directory and project dependencies are in sys.path
+_backend_dir = str(Path(__file__).resolve().parent)
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+
+_root_dir = str(Path(__file__).resolve().parent.parent)
+if _root_dir not in sys.path:
+    sys.path.append(_root_dir)
+
+_ai_service_dir = str(Path(__file__).resolve().parent.parent / "ai-service")
+if _ai_service_dir not in sys.path:
+    sys.path.append(_ai_service_dir)
+
 import time
 import logging
+import base64
+import json
+import os
 from typing import Optional, Dict, Any, List
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-import os
-from pathlib import Path
 from services.vision.vision_service import vision_service, _load_env_if_missing
 from services.vision.response_parser import to_legacy_analysis_result
 from services.vision.base_provider import (
@@ -152,6 +169,100 @@ def get_thresholds():
             for k, v in DEFAULT_CLASS_THRESHOLDS.items()
         }
     }
+
+
+try:
+    from grounding_dino import detect_objects
+    GROUNDING_DINO_AVAILABLE = True
+except Exception as _dino_err:
+    logger.warning(f"Could not import grounding_dino: {_dino_err}")
+    GROUNDING_DINO_AVAILABLE = False
+    detect_objects = None
+
+
+@app.post("/detect")
+@app.post("/api/detect")
+async def detect_endpoint(
+    file: UploadFile = File(...),
+    prompt: str = Form(...),
+    preset: Optional[str] = Form(None),
+    use_tiles: Optional[bool] = Form(None),
+    iou_threshold: Optional[float] = Form(None),
+    merge_mode: Optional[str] = Form("standard"),
+    enable_segmentation: Optional[bool] = Form(True),
+    enable_verification: Optional[bool] = Form(None),
+    verification_threshold: Optional[float] = Form(None),
+):
+    """
+    Grounding DINO Object Detection Endpoint.
+    Executes text-prompted zero-shot detection, tiling, NMS deduplication, SigLIP verification, and SAM2 segmentation.
+    """
+    if not GROUNDING_DINO_AVAILABLE or detect_objects is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Grounding DINO model is not currently available or failed to load."},
+        )
+
+    if file is None:
+        return JSONResponse(status_code=400, content={"error": "No image file was provided."})
+
+    if not prompt or not prompt.strip():
+        return JSONResponse(status_code=400, content={"error": "Detection prompt is required."})
+
+    image_bytes = await file.read()
+    if not image_bytes:
+        return JSONResponse(status_code=400, content={"error": "Uploaded image is empty."})
+
+    try:
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception as image_error:
+        return JSONResponse(status_code=400, content={"error": "Unable to read the uploaded image.", "details": str(image_error)})
+
+    try:
+        detections, tiling_meta = detect_objects(
+            image=image,
+            prompt=prompt.strip(),
+            preset=preset,
+            use_tiles=use_tiles,
+            iou_threshold=iou_threshold,
+            merge_mode=merge_mode or "standard",
+            enable_segmentation=enable_segmentation,
+            enable_verification=enable_verification,
+            verification_threshold=verification_threshold,
+            return_tiling_metadata=True,
+        )
+
+        if detections is None:
+            detections = []
+
+        dedup_stats = tiling_meta.get("deduplication") if isinstance(tiling_meta, dict) else None
+        seg_meta = tiling_meta.get("segmentation") if isinstance(tiling_meta, dict) else {}
+        seg_avail = seg_meta.get("segmentation_available", False) if isinstance(seg_meta, dict) else False
+        land_cover = tiling_meta.get("land_cover") if isinstance(tiling_meta, dict) else None
+        verification_meta = tiling_meta.get("verification") if isinstance(tiling_meta, dict) else {}
+        verification_avail = verification_meta.get("verification_available", False) if isinstance(verification_meta, dict) else False
+
+        result = {
+            "count": len(detections),
+            "width": image.width,
+            "height": image.height,
+            "prompt": prompt.strip(),
+            "preset": preset,
+            "detections": detections,
+            "tiling": tiling_meta,
+            "deduplication": dedup_stats,
+            "segmentation_available": seg_avail,
+            "segmentation": seg_meta,
+            "mask_overlay_url": seg_meta.get("mask_overlay_url") or seg_meta.get("overlay_preview"),
+            "land_cover": land_cover,
+            "verification_available": verification_avail,
+            "verification": verification_meta,
+        }
+
+        return JSONResponse(status_code=200, content=result)
+    except Exception as error:
+        logger.error(f"[Grounding DINO Error]: {error}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "Detection failed.", "details": str(error)})
 
 
 @app.post("/analyze")
@@ -331,6 +442,193 @@ async def temporal_multimodal_endpoint(req: BiTemporalMultimodalRequest):
     except Exception as e:
         logger.error(f"[Temporal Multimodal Error]: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Bi-temporal analysis failed: {str(e)}")
+
+
+def _image_to_data_url(image: Image.Image, format: str = "JPEG") -> str:
+    """Converts a PIL Image to a base64 data URL."""
+    buffered = io.BytesIO()
+    if format.upper() == "JPEG":
+        image.convert("RGB").save(buffered, format="JPEG", quality=90)
+        mime = "image/jpeg"
+    else:
+        image.save(buffered, format="PNG")
+        mime = "image/png"
+    encoded = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    return f"data:{mime};base64,{encoded}"
+
+
+@app.post("/temporal/manual")
+@app.post("/api/temporal/manual")
+async def temporal_manual_endpoint(
+    file_t1: UploadFile = File(...),
+    file_t2: UploadFile = File(...),
+    prompt: str = Form("building"),
+    date_t1: Optional[str] = Form("Time 1 (Reference)"),
+    date_t2: Optional[str] = Form("Time 2 (Recent)"),
+    aoi_json: Optional[str] = Form(None),
+    enable_pixel_change: bool = Form(True),
+):
+    """
+    Manual Bi-Temporal Comparison Endpoint (Stages 1 - 24).
+    Compares two uploaded images with SIFT/ORB registration, Lab-CLAHE normalization,
+    nuisance masking, multi-signal structural change detection, and calibrated confidence gating.
+    """
+    try:
+        bytes1 = await file_t1.read()
+        bytes2 = await file_t2.read()
+
+        image_t1 = Image.open(io.BytesIO(bytes1)).convert("RGB")
+        image_t2 = Image.open(io.BytesIO(bytes2)).convert("RGB")
+
+        aoi_dict = None
+        if aoi_json:
+            try:
+                aoi_dict = json.loads(aoi_json)
+            except Exception:
+                pass
+
+        analysis = bitemporal_analyzer.analyze(
+            t1_optical=image_t1,
+            t2_optical=image_t2,
+            prompt=prompt.strip() if prompt else "building",
+            date_t1=date_t1 or "Time 1",
+            date_t2=date_t2 or "Time 2",
+            aoi=aoi_dict,
+        )
+
+        t1_data_url = _image_to_data_url(image_t1)
+        t2_data_url = _image_to_data_url(image_t2)
+
+        response_payload = {
+            "success": True,
+            "aoi": aoi_dict,
+            "prompt": prompt,
+            "comparison": analysis.get("comparison", {}),
+            "changes": analysis.get("changes", []),
+            "summary": analysis.get("summary", {}),
+            "pixelChange": analysis.get("pixelChange", {}),
+            "registration": analysis.get("registration", {}),
+            "historical": {
+                "sceneId": file_t1.filename,
+                "provider": "User Upload (Time 1)",
+                "satellite": "Uploaded Image",
+                "acquisitionDate": date_t1 or "Time 1",
+                "resolution": "Native",
+            },
+            "latest": {
+                "sceneId": file_t2.filename,
+                "provider": "User Upload (Time 2)",
+                "satellite": "Uploaded Image",
+                "acquisitionDate": date_t2 or "Time 2",
+                "resolution": "Native",
+            },
+            "images": {
+                "t1DataUrl": t1_data_url,
+                "t2DataUrl": t2_data_url,
+            },
+            "overlays": analysis.get("overlays", {}),
+            "modalities": analysis.get("modalities", {}),
+            "objects": analysis.get("objects", {}),
+            "signals": analysis.get("signals", {}),
+            "nuisance": analysis.get("nuisance", {}),
+        }
+
+        return JSONResponse(status_code=200, content=response_payload)
+    except Exception as e:
+        logger.error(f"[Temporal Manual Endpoint Error]: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"success": False, "error": f"Manual temporal analysis failed: {str(e)}"})
+
+
+@app.post("/temporal/latest")
+@app.post("/api/temporal/latest")
+async def temporal_latest_endpoint(
+    request: Request,
+    aoi_north: Optional[float] = Form(None),
+    aoi_south: Optional[float] = Form(None),
+    aoi_east: Optional[float] = Form(None),
+    aoi_west: Optional[float] = Form(None),
+    prompt: Optional[str] = Form("building"),
+    historical_mode: Optional[str] = Form("date"),
+    historical_date: Optional[str] = Form(None),
+    historical_file: Optional[UploadFile] = File(None),
+    max_cloud_cover: Optional[float] = Form(20.0),
+    search_days: Optional[int] = Form(30),
+    provider: Optional[str] = Form(None),
+    enable_pixel_change: Optional[bool] = Form(True),
+):
+    """
+    Real-Time Bi-Temporal Satellite Comparison Endpoint (Stages 1 - 24).
+    Compares historical image vs latest retrieved satellite pass with calibrated gating.
+    """
+    try:
+        img_t1 = None
+        if historical_file is not None:
+            b1 = await historical_file.read()
+            img_t1 = Image.open(io.BytesIO(b1)).convert("RGB")
+
+        aoi_dict = None
+        if aoi_north is not None and aoi_south is not None and aoi_east is not None and aoi_west is not None:
+            aoi_dict = {
+                "north": float(aoi_north),
+                "south": float(aoi_south),
+                "east": float(aoi_east),
+                "west": float(aoi_west),
+            }
+
+        img_t2 = None
+        try:
+            import sys
+            root_dir = Path(__file__).resolve().parent.parent
+            if str(root_dir / "ai-service") not in sys.path:
+                sys.path.insert(0, str(root_dir / "ai-service"))
+            from satellite.provider_service import satellite_service
+            from satellite.provider_base import AOIBoundingBox
+
+            if aoi_dict:
+                aoi_obj = AOIBoundingBox(**aoi_dict)
+                img_t2, meta_t2 = satellite_service.get_latest(
+                    aoi=aoi_obj,
+                    max_cloud_cover=float(max_cloud_cover or 20.0),
+                    search_days=int(search_days or 30),
+                    provider_key=provider,
+                )
+        except Exception as sat_err:
+            logger.warning(f"[Satellite Service Warning]: {sat_err}")
+
+        if img_t2 is None:
+            img_t2 = img_t1
+
+        if img_t1 is None or img_t2 is None:
+            return JSONResponse(status_code=400, content={"success": False, "error": "Unable to acquire temporal imagery pair."})
+
+        analysis = bitemporal_analyzer.analyze(
+            t1_optical=img_t1,
+            t2_optical=img_t2,
+            prompt=prompt or "building",
+            date_t1=historical_date or "Time 1",
+            date_t2="Latest",
+            aoi=aoi_dict,
+        )
+
+        t1_data_url = _image_to_data_url(img_t1)
+        t2_data_url = _image_to_data_url(img_t2)
+
+        return JSONResponse(status_code=200, content={
+            "success": True,
+            "aoi": aoi_dict,
+            "prompt": prompt,
+            "comparison": analysis.get("comparison", {}),
+            "changes": analysis.get("changes", []),
+            "summary": analysis.get("summary", {}),
+            "pixelChange": analysis.get("pixelChange", {}),
+            "registration": analysis.get("registration", {}),
+            "images": {"t1DataUrl": t1_data_url, "t2DataUrl": t2_data_url},
+            "overlays": analysis.get("overlays", {}),
+            "objects": analysis.get("objects", {}),
+        })
+    except Exception as e:
+        logger.error(f"[Temporal Latest Endpoint Error]: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"success": False, "error": f"Latest temporal analysis failed: {str(e)}"})
 
 
 if __name__ == "__main__":

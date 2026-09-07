@@ -18,6 +18,8 @@ from .vocabulary import (
     filter_and_format_detections,
     remove_duplicate_detections,
     box_iou,
+    count_edge_touches,
+    passes_box_sanity,
 )
 
 from .tiler import (
@@ -68,6 +70,16 @@ from .land_cover import (
     map_label_to_category,
 )
 
+from .config import (
+    DINO_BOX_THRESHOLD,
+    DINO_TEXT_THRESHOLD,
+    NMS_IOU_THRESHOLD,
+    DINO_IOU_THRESHOLD,
+    SIGLIP_THRESHOLD,
+    MAX_VISIBLE_DETECTIONS,
+    OVERALL_CONFIDENCE_WEIGHTS,
+)
+
 from .verifier import (
     VERIFIER_AVAILABLE,
     ENABLE_VERIFICATION,
@@ -95,6 +107,8 @@ __all__ = [
     "filter_and_format_detections",
     "remove_duplicate_detections",
     "box_iou",
+    "count_edge_touches",
+    "passes_box_sanity",
     "TILE_SIZE",
     "TILE_OVERLAP",
     "ENABLE_TILING",
@@ -131,6 +145,13 @@ __all__ = [
     "LABEL_TO_CATEGORY",
     "LAND_COVER_COLORS",
     "map_label_to_category",
+    "DINO_BOX_THRESHOLD",
+    "DINO_TEXT_THRESHOLD",
+    "NMS_IOU_THRESHOLD",
+    "DINO_IOU_THRESHOLD",
+    "SIGLIP_THRESHOLD",
+    "MAX_VISIBLE_DETECTIONS",
+    "OVERALL_CONFIDENCE_WEIGHTS",
     "VERIFIER_AVAILABLE",
     "ENABLE_VERIFICATION",
     "VERIFICATION_THRESHOLD",

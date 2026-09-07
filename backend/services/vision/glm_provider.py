@@ -4,6 +4,7 @@ Uses Zhipu/Z.AI PAAS API (GLM-4.6V-Flash) with OpenAI-compatible multimodal chat
 """
 
 import os
+import asyncio
 import base64
 import httpx
 from typing import Optional, Dict, Any, List
@@ -121,28 +122,44 @@ class GLMVisionProvider(VisionProvider):
             "max_tokens": 2048,
         }
 
+        max_retries = 2
+        response = None
         async with httpx.AsyncClient(timeout=45.0) as client:
-            try:
-                response = await client.post(
-                    endpoint,
-                    json=payload,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {api_key}",
-                    },
-                )
-            except httpx.TimeoutException:
-                raise VisionProviderError(
-                    f"GLM API request timed out after 45 seconds.",
-                    status_code=504,
-                    provider="glm",
-                )
-            except Exception as e:
-                raise VisionProviderError(
-                    f"GLM network connection error: {e}",
-                    status_code=503,
-                    provider="glm",
-                )
+            for attempt in range(max_retries + 1):
+                try:
+                    response = await client.post(
+                        endpoint,
+                        json=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {api_key}",
+                        },
+                    )
+                    if response.status_code == 429 and attempt < max_retries:
+                        await asyncio.sleep(1.5 * (attempt + 1))
+                        continue
+                    break
+                except httpx.TimeoutException:
+                    if attempt < max_retries:
+                        await asyncio.sleep(1.0)
+                        continue
+                    raise VisionProviderError(
+                        f"GLM API request timed out after 45 seconds.",
+                        status_code=504,
+                        provider="glm",
+                    )
+                except Exception as e:
+                    if attempt < max_retries:
+                        await asyncio.sleep(1.0)
+                        continue
+                    raise VisionProviderError(
+                        f"GLM network connection error: {e}",
+                        status_code=503,
+                        provider="glm",
+                    )
+
+        if response is None:
+            raise VisionProviderError("GLM API failed with no response received.", status_code=502, provider="glm")
 
         if response.status_code == 401 or response.status_code == 403:
             raise VisionProviderAuthError(

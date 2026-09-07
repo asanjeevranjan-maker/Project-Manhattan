@@ -4,9 +4,12 @@ Uses Google Generative Language REST API with structured JSON response mode and 
 """
 
 import os
+import logging
 import base64
 import httpx
 from typing import Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 from .base_provider import (
     VisionProvider,
@@ -55,7 +58,11 @@ class GeminiVisionProvider(VisionProvider):
 
     @property
     def effective_model(self) -> str:
-        return self.model or os.getenv("GEMINI_MODEL") or "gemini-3.6-flash"
+        model = self.model or os.getenv("GEMINI_MODEL") or "gemini-2.0-flash"
+        # Sanitize known deprecated / invalid model names
+        if model in ("gemini-3.6-flash", "gemini-flash-latest"):
+            model = "gemini-2.0-flash"
+        return model
 
     async def analyze(
         self,
@@ -79,6 +86,11 @@ class GeminiVisionProvider(VisionProvider):
                 "GEMINI_API_KEY is not configured.",
                 status_code=500,
                 provider="gemini",
+            )
+        if not api_key.startswith("AIzaSy"):
+            logger.warning(
+                "[GeminiVision] GEMINI_API_KEY does not have the standard Google AI Studio prefix ('AIzaSy...'). "
+                "If authentication fails with 401, obtain a valid API key from https://aistudio.google.com/app/apikey."
             )
         model = self.effective_model
 

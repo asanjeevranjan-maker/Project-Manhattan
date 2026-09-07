@@ -143,7 +143,7 @@ async function callGeminiVision(prompt: string, images: string[]): Promise<strin
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
 
-  const model = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
   const parts: Array<Record<string, unknown>> = [{ text: prompt }];
@@ -228,14 +228,14 @@ Return JSON ONLY matching this structure:
     {
       "type": "new",
       "label": "${prompt.split('.')[0].trim() || 'target'}",
-      "confidence": 0.88,
+      "confidence": 0.72,
       "boxT1": null,
       "boxT2": [180, 220, 290, 340],
       "details": "Newly arrived object/structure identified"
     }
   ]
 }
-Coordinates must be in 0 to 640 pixel range: [ymin, xmin, ymax, xmax] or [xmin, ymin, xmax, ymax]. Return raw JSON only without markdown formatting.`;
+Coordinates must be in 0 to 640 pixel range: [ymin, xmin, ymax, xmax] or [xmin, ymin, xmax, ymax]. Return raw JSON only without markdown formatting. If no changes or objects are observed, return {"changes": []}.`;
 
   const geminiText = await callGeminiVision(promptText, [t1DataUrl, t2DataUrl]);
   if (geminiText) {
@@ -252,15 +252,15 @@ Coordinates must be in 0 to 640 pixel range: [ymin, xmin, ymax, xmax] or [xmin, 
 
             return {
               id: `cloud-chg-${idx + 1}`,
-              type: (c.type as 'new' | 'removed' | 'modified' | 'unchanged') || 'new',
+              type: (c.type as 'new' | 'removed' | 'modified' | 'unchanged') || 'unchanged',
               label: c.label || prompt.split('.')[0].trim() || 'target',
-              confidence: typeof c.confidence === 'number' ? c.confidence : 0.86,
+              confidence: typeof c.confidence === 'number' ? Math.min(0.95, Math.max(0.1, c.confidence)) : 0.65,
               boxT1: c.boxT1 || null,
               boxT2: c.boxT2 || null,
               currentBox: box,
               latitude: Number(itemLat.toFixed(5)),
               longitude: Number(itemLon.toFixed(5)),
-              details: c.details || `${c.type === 'new' ? 'New' : 'Modified'} target detected`,
+              details: c.details || `${c.type === 'new' ? 'New' : c.type === 'removed' ? 'Removed' : 'Observation'} detected`,
               historicalDate: histAcqDate,
               latestDate: latestAcqDate,
             };
@@ -272,40 +272,7 @@ Coordinates must be in 0 to 640 pixel range: [ymin, xmin, ymax, xmax] or [xmin, 
     }
   }
 
-  // Fallback items if Gemini didn't return detections
-  if (changes.length === 0) {
-    const primaryLabel = prompt.split('.')[0].trim() || 'target';
-    changes = [
-      {
-        id: 'cloud-chg-1',
-        type: 'new',
-        label: primaryLabel,
-        confidence: 0.88,
-        boxT1: null,
-        boxT2: [160, 210, 295, 330],
-        currentBox: [160, 210, 295, 330],
-        latitude: Number((centerLat + 0.003).toFixed(5)),
-        longitude: Number((centerLon - 0.002).toFixed(5)),
-        details: `Newly arrived ${primaryLabel} identified in latest observation pass`,
-        historicalDate: histAcqDate,
-        latestDate: latestAcqDate,
-      },
-      {
-        id: 'cloud-chg-2',
-        type: 'new',
-        label: primaryLabel,
-        confidence: 0.82,
-        boxT1: null,
-        boxT2: [340, 180, 440, 270],
-        currentBox: [340, 180, 440, 270],
-        latitude: Number((centerLat - 0.002).toFixed(5)),
-        longitude: Number((centerLon + 0.003).toFixed(5)),
-        details: `Active ${primaryLabel} observed in latest satellite pass`,
-        historicalDate: histAcqDate,
-        latestDate: latestAcqDate,
-      },
-    ];
-  }
+  // Do NOT synthesize fake changes if none detected. Real satellite comparison must remain honest.
 
   const newCount = changes.filter((c) => c.type === 'new').length;
   const removedCount = changes.filter((c) => c.type === 'removed').length;
@@ -389,14 +356,14 @@ Return JSON ONLY matching this structure:
     {
       "type": "new",
       "label": "${prompt.split('.')[0].trim() || 'target'}",
-      "confidence": 0.88,
+      "confidence": 0.72,
       "boxT1": null,
       "boxT2": [180, 220, 290, 340],
       "details": "Newly arrived object/structure identified"
     }
   ]
 }
-Coordinates must be in 0 to 640 pixel range. Return raw JSON only without markdown formatting.`;
+Coordinates must be in 0 to 640 pixel range. Return raw JSON only without markdown formatting. If no changes or objects are observed, return {"changes": []}.`;
 
   const geminiText = await callGeminiVision(promptText, [t1DataUrl, t2DataUrl]);
   if (geminiText) {
@@ -418,15 +385,15 @@ Coordinates must be in 0 to 640 pixel range. Return raw JSON only without markdo
 
             return {
               id: `manual-chg-${idx + 1}`,
-              type: (c.type as 'new' | 'removed' | 'modified' | 'unchanged') || 'new',
+              type: (c.type as 'new' | 'removed' | 'modified' | 'unchanged') || 'unchanged',
               label: c.label || prompt.split('.')[0].trim() || 'target',
-              confidence: typeof c.confidence === 'number' ? c.confidence : 0.86,
+              confidence: typeof c.confidence === 'number' ? Math.min(0.95, Math.max(0.1, c.confidence)) : 0.65,
               boxT1: c.boxT1 || null,
               boxT2: c.boxT2 || null,
               currentBox: box,
               latitude: itemLat,
               longitude: itemLon,
-              details: c.details || `${c.type === 'new' ? 'New' : 'Modified'} target detected`,
+              details: c.details || `${c.type === 'new' ? 'New' : c.type === 'removed' ? 'Removed' : 'Observation'} detected`,
               historicalDate: dateT1,
               latestDate: dateT2,
             };
@@ -438,23 +405,7 @@ Coordinates must be in 0 to 640 pixel range. Return raw JSON only without markdo
     }
   }
 
-  if (changes.length === 0) {
-    const primaryLabel = prompt.split('.')[0].trim() || 'target';
-    changes = [
-      {
-        id: 'manual-chg-1',
-        type: 'new',
-        label: primaryLabel,
-        confidence: 0.86,
-        boxT1: null,
-        boxT2: [180, 200, 310, 330],
-        currentBox: [180, 200, 310, 330],
-        details: `Identified ${primaryLabel} present in Time 2 observation`,
-        historicalDate: dateT1,
-        latestDate: dateT2,
-      },
-    ];
-  }
+  // Do NOT synthesize fake changes if none detected. Real satellite comparison must remain honest.
 
   const newCount = changes.filter((c) => c.type === 'new').length;
   const removedCount = changes.filter((c) => c.type === 'removed').length;
@@ -576,16 +527,7 @@ Coordinates must be [xmin, ymin, xmax, ymax] in 0 to 640 range. Return raw JSON 
     }
   }
 
-  if (rawDets.length === 0) {
-    rawDets = [
-      {
-        label: "building",
-        raw_label: "structure",
-        score: 0.84,
-        box: [180, 220, 310, 350],
-      },
-    ];
-  }
+  // If no detections found, preserve empty array instead of fabricating false structures
 
   const formattedDetections = rawDets.map((d, idx) => {
     const rawBox = d.box || d.bbox || [100, 100, 200, 200];

@@ -18,17 +18,20 @@ if not logger.handlers:
 # =====================================================================
 # CONFIGURABLE DEFAULT CONSTANTS
 # =====================================================================
-# Default tile size in pixels (1024x1024 captures fine satellite features while fitting VRAM)
-TILE_SIZE: int = int(os.getenv("DINO_TILE_SIZE", "1024"))
+# Tile size in pixels. 512 gives Grounding DINO's processor (shortest edge
+# resized to 800px) a ~1.56x effective zoom, which is critical for detecting
+# small dense features (buildings, vehicles) in overhead imagery.
+TILE_SIZE: int = int(os.getenv("DINO_TILE_SIZE", "512"))
 
-# Overlap ratio between adjacent tiles (15% prevents boundary truncation)
-TILE_OVERLAP: float = float(os.getenv("DINO_TILE_OVERLAP", "0.15"))
+# Overlap ratio between adjacent tiles (25% prevents boundary truncation)
+TILE_OVERLAP: float = float(os.getenv("DINO_TILE_OVERLAP", "0.25"))
 
 # Global toggle to enable/disable tiling
 ENABLE_TILING: bool = os.getenv("DINO_ENABLE_TILING", "true").lower() in ("true", "1", "yes")
 
-# Minimum image dimension required before tiling is activated
-MIN_IMAGE_SIZE_FOR_TILING: int = int(os.getenv("DINO_MIN_IMAGE_SIZE_FOR_TILING", "1024"))
+# Minimum image dimension required before tiling is activated.
+# 768 ensures typical 1024x1024 satellite samples are tiled (3x3 grid = 9 tiles).
+MIN_IMAGE_SIZE_FOR_TILING: int = int(os.getenv("DINO_MIN_IMAGE_SIZE_FOR_TILING", "768"))
 
 # Maximum number of tiles permitted to prevent runaway inference latency
 MAX_TILES: int = int(os.getenv("DINO_MAX_TILES", "16"))

@@ -125,6 +125,31 @@ def _format_time_difference(date1_str: str, date2_str: str) -> str:
         return ", ".join(parts) if parts else "Same date"
     except Exception:
         return "Temporal interval"
+        return ", ".join(parts) if parts else "Same date"
+    except Exception:
+        return "Temporal interval"
+
+
+def _summarize_detection_meta(meta: Optional[dict], detections: Optional[list]) -> dict:
+    """
+    Compact per-timestamp summary of the Grounding DINO + SAM2 detection stage.
+    Consumed by the frontend to render detection-quality badges in the
+    bi-temporal comparison results.
+    """
+    meta = meta if isinstance(meta, dict) else {}
+    seg = meta.get("segmentation") if isinstance(meta.get("segmentation"), dict) else {}
+    ver = meta.get("verification") if isinstance(meta.get("verification"), dict) else {}
+    return {
+        "detectionsCount": len(detections) if detections else 0,
+        "segmentationAvailable": bool(seg.get("segmentation_available", seg.get("sam2_available", False))),
+        "segmentedCount": int(seg.get("segmented_count", 0) or 0),
+        "samBackend": seg.get("sam2_backend") or seg.get("backend"),
+        "segmentationFailureReason": seg.get("failure_reason"),
+        "verificationAvailable": bool(ver.get("verification_available", False)),
+        "verifiedCount": int(ver.get("verified_count", 0) or 0),
+        "rejectedCount": int(ver.get("rejected_count", 0) or 0),
+        "tilingEnabled": bool(meta.get("enabled", False)),
+    }
 
 
 # =========================================================
@@ -494,12 +519,25 @@ async def temporal_latest(
         reg_quality = reg_result["registration_quality"]
         reg_warning = reg_result["warning"]
 
-        # 5. Dual-Temporal Grounding DINO Object Detection (with exact same prompt)
-        print(f"[Temporal] Running Grounding DINO on Historical Scene (T1) for prompt: '{clean_prompt}'...")
-        detections_t1 = detect_objects(aligned_t1, clean_prompt)
+        # 5. Dual-Temporal Grounding DINO + SAM2 Detection (with exact same prompt).
+        #    SAM2 segmentation + SigLIP verification + confidence calibration run on
+        #    BOTH timestamps so every object carries precise masks and calibrated
+        #    confidences before temporal matching.
+        print(f"[Temporal] Running Grounding DINO + SAM2 on Historical Scene (T1) for prompt: '{clean_prompt}'...")
+        detections_t1, det_meta_t1 = detect_objects(
+            aligned_t1,
+            clean_prompt,
+            enable_segmentation=True,
+            return_tiling_metadata=True,
+        )
 
-        print(f"[Temporal] Running Grounding DINO on Latest Scene (T2) for prompt: '{clean_prompt}'...")
-        detections_t2 = detect_objects(aligned_t2, clean_prompt)
+        print(f"[Temporal] Running Grounding DINO + SAM2 on Latest Scene (T2) for prompt: '{clean_prompt}'...")
+        detections_t2, det_meta_t2 = detect_objects(
+            aligned_t2,
+            clean_prompt,
+            enable_segmentation=True,
+            return_tiling_metadata=True,
+        )
 
         # 6. Temporal Spatial Object Matching & Geolocation
         print("[Temporal] Matching objects across timestamps & calculating geolocation...")
@@ -514,6 +552,12 @@ async def temporal_latest(
             aoi=aoi,
             historical_date=hist_date_disp,
             latest_date=latest_date_disp,
+            # Aligned imagery enables visual crop-similarity verification of
+            # unmatched detections (distinguishes genuine new/removed objects
+            # from detection dropout).
+            image_t1=aligned_t1,
+            image_t2=aligned_t2,
+            registration_quality=reg_quality,
         )
 
         # 7. Pixel-Level Change Detection
@@ -541,6 +585,10 @@ async def temporal_latest(
                 "quality": reg_quality,
                 "warning": reg_warning,
                 "transformation": reg_result.get("transformation_type", "geospatial"),
+            },
+            "objectDetection": {
+                "t1": _summarize_detection_meta(det_meta_t1, detections_t1),
+                "t2": _summarize_detection_meta(det_meta_t2, detections_t2),
             },
             "historical": meta_t1_dict,
             "latest": meta_t2_dict,
@@ -615,11 +663,23 @@ async def temporal_manual(
         aligned_t1 = reg_result["aligned_t1"]
         aligned_t2 = reg_result["aligned_t2"]
 
-        # 2. Dual Grounding DINO detection
-        detections_t1 = detect_objects(aligned_t1, clean_prompt)
-        detections_t2 = detect_objects(aligned_t2, clean_prompt)
+        # 2. Dual Grounding DINO + SAM2 detection (segmentation + verification +
+        #    confidence calibration on both timestamps)
+        detections_t1, det_meta_t1 = detect_objects(
+            aligned_t1,
+            clean_prompt,
+            enable_segmentation=True,
+            return_tiling_metadata=True,
+        )
+        detections_t2, det_meta_t2 = detect_objects(
+            aligned_t2,
+            clean_prompt,
+            enable_segmentation=True,
+            return_tiling_metadata=True,
+        )
 
-        # 3. Match objects
+        # 3. Match objects (aligned imagery enables visual verification of
+        #    unmatched detections)
         match_res = match_temporal_detections(
             detections_t1=detections_t1,
             detections_t2=detections_t2,
@@ -628,6 +688,9 @@ async def temporal_manual(
             aoi=aoi,
             historical_date=date_t1 or "Time 1",
             latest_date=date_t2 or "Time 2",
+            image_t1=aligned_t1,
+            image_t2=aligned_t2,
+            registration_quality=reg_result["registration_quality"],
         )
 
         # 4. Pixel change
@@ -650,6 +713,10 @@ async def temporal_manual(
                 "quality": reg_result["registration_quality"],
                 "warning": reg_result["warning"],
                 "transformation": reg_result["transformation_type"],
+            },
+            "objectDetection": {
+                "t1": _summarize_detection_meta(det_meta_t1, detections_t1),
+                "t2": _summarize_detection_meta(det_meta_t2, detections_t2),
             },
             "historical": {
                 "sceneId": file_t1.filename,
@@ -811,6 +878,70 @@ async def temporal_multimodal(
             "success": False,
             "error": "Multimodal temporal comparison failed.",
             "details": str(error)
+        })
+
+
+# =========================================================
+# OPTICAL + SAR FUSION (THIRD ANALYSIS MODE)
+# =========================================================
+
+try:
+    from optical_sar_fusion import optical_sar_fusion_service
+    FUSION_SERVICE_AVAILABLE = True
+except Exception as _fe:
+    print(f"[Warning] Failed to import optical-sar fusion service: {_fe}")
+    optical_sar_fusion_service = None
+    FUSION_SERVICE_AVAILABLE = False
+
+
+@app.post("/fusion/optical-sar")
+@app.post("/api/fusion/optical-sar")
+async def fusion_optical_sar(
+    file1: UploadFile = File(...),
+    file2: UploadFile = File(...),
+    prompt: str = Form(""),
+):
+    """
+    Optical + SAR Fusion analysis (task = optical_sar_fusion).
+
+    Input order does NOT matter: both uploads are modality-detected and
+    normalized into optical_image / sar_image internally. Requires one
+    optical and one SAR image of the same (near-same) region.
+    """
+    if not FUSION_SERVICE_AVAILABLE or optical_sar_fusion_service is None:
+        return JSONResponse(status_code=503, content={
+            "task": "optical_sar_fusion",
+            "status": "INSUFFICIENT_EVIDENCE",
+            "error": "Optical + SAR fusion service is not available on this backend instance.",
+        })
+    try:
+        if file1 is None or file2 is None:
+            return JSONResponse(status_code=400, content={
+                "task": "optical_sar_fusion",
+                "status": "INSUFFICIENT_EVIDENCE",
+                "error": "Two images are required: one optical and one SAR.",
+            })
+
+        bytes1 = await file1.read()
+        bytes2 = await file2.read()
+        name1 = file1.filename or ""
+        name2 = file2.filename or ""
+        clean_prompt = (prompt or "").strip()
+
+        print(f"\n[OPTICAL-SAR] Fusion request: '{name1}' + '{name2}' | prompt: '{clean_prompt[:80]}'")
+        result = optical_sar_fusion_service.run(bytes1, bytes2, name1, name2, clean_prompt)
+
+        status_code = 200 if result.get("status") != "INSUFFICIENT_EVIDENCE" or result.get("answer") else 422
+        return JSONResponse(status_code=status_code, content=result)
+
+    except Exception as error:
+        print("\n[FASTAPI OPTICAL-SAR FUSION ERROR]")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={
+            "task": "optical_sar_fusion",
+            "status": "INSUFFICIENT_EVIDENCE",
+            "error": "Optical + SAR fusion failed unexpectedly on the server.",
+            "details": str(error),
         })
 
 
